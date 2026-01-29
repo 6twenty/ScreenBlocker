@@ -97,6 +97,7 @@ class ScheduleManager: ObservableObject {
         // (OverlayView accesses ScheduleManager.shared, which would deadlock if still initializing)
         DispatchQueue.main.async { [weak self] in
             self?.checkSchedules()
+            self?.pruneStaleDeliveredNotifications()
             self?.scheduleUpcomingNotifications()
         }
     }
@@ -287,6 +288,12 @@ class ScheduleManager: ObservableObject {
     }
 
     func deleteSchedule(_ schedule: Schedule) {
+        // Remove notifications for this specific schedule (both pending and delivered)
+        let identifier = "block-\(schedule.id.uuidString)"
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+
         schedules.removeAll { $0.id == schedule.id }
         saveSchedules()
     }
@@ -377,6 +384,29 @@ class ScheduleManager: ObservableObject {
     }
 
     // MARK: - Notifications
+
+    private func pruneStaleDeliveredNotifications() {
+        let center = UNUserNotificationCenter.current()
+        let validScheduleIDs = Set(schedules.map { $0.id.uuidString })
+
+        center.getDeliveredNotifications { notifications in
+            let staleIdentifiers = notifications.compactMap { notification -> String? in
+                let identifier = notification.request.identifier
+                // Notification identifiers are "block-<uuid>"
+                guard identifier.hasPrefix("block-") else { return nil }
+                let uuidString = String(identifier.dropFirst("block-".count))
+                // If this UUID doesn't match any current schedule, it's stale
+                if !validScheduleIDs.contains(uuidString) {
+                    return identifier
+                }
+                return nil
+            }
+
+            if !staleIdentifiers.isEmpty {
+                center.removeDeliveredNotifications(withIdentifiers: staleIdentifiers)
+            }
+        }
+    }
 
     private func scheduleUpcomingNotifications() {
         let center = UNUserNotificationCenter.current()

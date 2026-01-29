@@ -24,6 +24,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Cleanup if needed
+        // Clear pending notifications - they're only useful if the app is running
+        // (a "block starting soon" notification is misleading if no block will actually start)
+        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
     }
 }
