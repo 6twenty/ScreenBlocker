@@ -3,6 +3,7 @@ import Foundation
 struct Schedule: Codable, Identifiable, Equatable, Hashable {
     var id: UUID
     var name: String
+    var message: String
     var startHour: Int
     var startMinute: Int
     var endHour: Int
@@ -13,6 +14,7 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
     init(
         id: UUID = UUID(),
         name: String = "New Block",
+        message: String = "",
         startHour: Int = 9,
         startMinute: Int = 0,
         endHour: Int = 9,
@@ -22,12 +24,48 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
     ) {
         self.id = id
         self.name = name
+        self.message = message
         self.startHour = startHour
         self.startMinute = startMinute
         self.endHour = endHour
         self.endMinute = endMinute
         self.enabledDays = enabledDays
         self.isEnabled = isEnabled
+    }
+
+    // Custom Decodable to handle missing 'message' field from older saved data
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        message = try container.decodeIfPresent(String.self, forKey: .message) ?? ""
+        startHour = try container.decode(Int.self, forKey: .startHour)
+        startMinute = try container.decode(Int.self, forKey: .startMinute)
+        endHour = try container.decode(Int.self, forKey: .endHour)
+        endMinute = try container.decode(Int.self, forKey: .endMinute)
+        enabledDays = try container.decode(Set<Weekday>.self, forKey: .enabledDays)
+        isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, message, startHour, startMinute, endHour, endMinute, enabledDays, isEnabled
+    }
+
+    /// Duration in minutes, handling overnight schedules correctly
+    var durationMinutes: Int {
+        let startMinutes = startHour * 60 + startMinute
+        let endMinutes = endHour * 60 + endMinute
+
+        if endMinutes > startMinutes {
+            // Normal same-day schedule
+            return endMinutes - startMinutes
+        } else if endMinutes < startMinutes {
+            // Overnight schedule (e.g., 22:00-02:00)
+            return (24 * 60 - startMinutes) + endMinutes
+        } else {
+            // start == end: ambiguous, default to 30 minutes
+            return 30
+        }
     }
 
     var startTimeString: String {
@@ -88,14 +126,11 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
     }
 
     /// Check if the schedule is currently active
+    /// Handles overnight schedules (e.g., 22:00-02:00) where end time is before start time
     func isActive(at date: Date = Date()) -> Bool {
         guard isEnabled else { return false }
 
         let calendar = Calendar.current
-        let weekday = Weekday.from(date: date)
-
-        guard enabledDays.contains(weekday) else { return false }
-
         let components = calendar.dateComponents([.hour, .minute], from: date)
         guard let hour = components.hour, let minute = components.minute else { return false }
 
@@ -103,7 +138,31 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
         let startMinutes = startHour * 60 + startMinute
         let endMinutes = endHour * 60 + endMinute
 
-        return currentMinutes >= startMinutes && currentMinutes < endMinutes
+        // Check if this is an overnight schedule (end time is before start time)
+        let isOvernight = endMinutes <= startMinutes
+
+        if isOvernight {
+            // For overnight schedules, we need to check two cases:
+            // 1. Current time is after start (same day as start) - check yesterday's weekday for the "start day"
+            // 2. Current time is before end (next day after start) - check today's weekday against start day
+
+            let todayWeekday = Weekday.from(date: date)
+            let yesterdayWeekday = Weekday.from(date: calendar.date(byAdding: .day, value: -1, to: date) ?? date)
+
+            if currentMinutes >= startMinutes {
+                // We're in the "after start" portion - check if today is an enabled start day
+                return enabledDays.contains(todayWeekday)
+            } else if currentMinutes < endMinutes {
+                // We're in the "before end" portion (early morning) - check if yesterday was an enabled start day
+                return enabledDays.contains(yesterdayWeekday)
+            }
+            return false
+        } else {
+            // Normal same-day schedule
+            let weekday = Weekday.from(date: date)
+            guard enabledDays.contains(weekday) else { return false }
+            return currentMinutes >= startMinutes && currentMinutes < endMinutes
+        }
     }
 }
 
@@ -120,28 +179,16 @@ enum Weekday: Int, Codable, CaseIterable, Comparable {
         lhs.rawValue < rhs.rawValue
     }
 
+    /// Locale-aware short weekday name (e.g., "Mon", "Tue")
     var shortName: String {
-        switch self {
-        case .sunday: return "Sun"
-        case .monday: return "Mon"
-        case .tuesday: return "Tue"
-        case .wednesday: return "Wed"
-        case .thursday: return "Thu"
-        case .friday: return "Fri"
-        case .saturday: return "Sat"
-        }
+        let symbols = Calendar.current.shortWeekdaySymbols
+        return symbols[rawValue - 1]  // rawValue is 1-based, array is 0-based
     }
 
-    var initial: String {
-        switch self {
-        case .sunday: return "S"
-        case .monday: return "M"
-        case .tuesday: return "T"
-        case .wednesday: return "W"
-        case .thursday: return "T"
-        case .friday: return "F"
-        case .saturday: return "S"
-        }
+    /// Locale-aware very short weekday name (e.g., "M", "Tu")
+    var veryShortName: String {
+        let symbols = Calendar.current.veryShortWeekdaySymbols
+        return symbols[rawValue - 1]
     }
 
     static func from(date: Date) -> Weekday {

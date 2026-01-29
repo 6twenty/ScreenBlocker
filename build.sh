@@ -20,6 +20,9 @@ cp .build/release/ScreenBlocker "$APP_DIR/Contents/MacOS/"
 # Copy Info.plist
 cp Resources/Info.plist "$APP_DIR/Contents/"
 
+# Copy app icon
+cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/"
+
 # Ad-hoc sign the app (allows running without Gatekeeper issues on your machine)
 codesign --force --deep --sign - "$APP_DIR"
 

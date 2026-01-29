@@ -6,12 +6,18 @@ class ScheduleManager: ObservableObject {
 
     @Published var schedules: [Schedule] = []
     @Published var isBlocking: Bool = false
+    @Published var isManualBlock: Bool = false
+    @Published var currentBlockStartTime: Date?
     @Published var currentBlockEndTime: Date?
     @Published var nextBlockStartTime: Date?
+    @Published var nextSchedule: Schedule?
+    @Published var activeSchedule: Schedule?
     @Published var notificationLeadTime: Int = 5 // minutes before block
+    @Published var snoozeEndTime: Date?
 
     private var checkTimer: Timer?
-    private var snoozeEndTime: Date?
+    private var manualBlockSchedule: Schedule?
+    private var exitedSchedules: [UUID: Date] = [:]  // Schedule ID -> suppressed until time
 
     private let schedulesKey = "ScreenBlocker.schedules"
     private let notificationLeadTimeKey = "ScreenBlocker.notificationLeadTime"
@@ -25,14 +31,12 @@ class ScheduleManager: ObservableObject {
     // MARK: - Persistence
 
     private func loadSchedules() {
-        if let data = UserDefaults.standard.data(forKey: schedulesKey),
-           let decoded = try? JSONDecoder().decode([Schedule].self, from: data) {
-            schedules = decoded
-        } else {
-            // Default schedules for demo
+        guard let data = UserDefaults.standard.data(forKey: schedulesKey) else {
+            // First run - use default schedules for demo
             schedules = [
                 Schedule(
                     name: "Morning Break",
+                    message: "Take a 15 minute walk",
                     startHour: 10,
                     startMinute: 30,
                     endHour: 10,
@@ -41,6 +45,7 @@ class ScheduleManager: ObservableObject {
                 ),
                 Schedule(
                     name: "Lunch",
+                    message: "Time for lunch and practice drums",
                     startHour: 13,
                     startMinute: 0,
                     endHour: 14,
@@ -48,6 +53,15 @@ class ScheduleManager: ObservableObject {
                     enabledDays: Set([.monday, .tuesday, .wednesday, .thursday, .friday])
                 )
             ]
+            return
+        }
+
+        do {
+            schedules = try JSONDecoder().decode([Schedule].self, from: data)
+        } catch {
+            print("Failed to decode schedules (data may be corrupted): \(error)")
+            // Keep schedules empty rather than silently replacing with defaults
+            schedules = []
         }
     }
 
@@ -79,9 +93,12 @@ class ScheduleManager: ObservableObject {
         }
         checkTimer?.tolerance = 0.1
 
-        // Initial check
-        checkSchedules()
-        scheduleUpcomingNotifications()
+        // Defer initial check to avoid recursive lock during singleton initialization
+        // (OverlayView accesses ScheduleManager.shared, which would deadlock if still initializing)
+        DispatchQueue.main.async { [weak self] in
+            self?.checkSchedules()
+            self?.scheduleUpcomingNotifications()
+        }
     }
 
     private func checkSchedules() {
@@ -97,28 +114,56 @@ class ScheduleManager: ObservableObject {
             updateNextBlockTime()
             return
         } else if snoozeEndTime != nil {
-            // Snooze expired
+            // Snooze expired - clear snooze state
             snoozeEndTime = nil
+            // Clear block start time so fresh blocks get a new start time
+            // (if the block resumes, it will be set below; if not, we need it cleared)
+            currentBlockStartTime = nil
         }
+
+        // Check for manual block first
+        if let manualSchedule = manualBlockSchedule, let endTime = currentBlockEndTime {
+            if now < endTime {
+                // Manual block still active
+                if !isBlocking {
+                    isBlocking = true
+                    activeSchedule = manualSchedule
+                    OverlayWindowController.shared.showOverlay()
+                }
+                updateNextBlockTime()
+                return
+            } else {
+                // Manual block ended naturally (timed out)
+                StatsManager.shared.endBlock(reason: .completed)
+                manualBlockSchedule = nil
+                isManualBlock = false
+                isBlocking = false
+                currentBlockStartTime = nil
+                currentBlockEndTime = nil
+                activeSchedule = nil
+                OverlayWindowController.shared.hideOverlay()
+            }
+        }
+
+        // Clean up expired exited schedules
+        exitedSchedules = exitedSchedules.filter { $0.value > now }
 
         // Check if any schedule is currently active
         var shouldBlock = false
         var blockEnd: Date?
+        var currentActiveSchedule: Schedule?
 
         for schedule in schedules where schedule.isActive(at: now) {
+            // Skip schedules that were manually exited (until their natural end time)
+            if let exitedUntil = exitedSchedules[schedule.id], now < exitedUntil {
+                continue
+            }
             shouldBlock = true
+            currentActiveSchedule = schedule
 
-            // Calculate end time for today
-            let calendar = Calendar.current
-            var components = calendar.dateComponents([.year, .month, .day], from: now)
-            components.hour = schedule.endHour
-            components.minute = schedule.endMinute
-            components.second = 0
-
-            if let endTime = calendar.date(from: components) {
-                if blockEnd == nil || endTime > blockEnd! {
-                    blockEnd = endTime
-                }
+            let endTime = computeScheduleEndTime(for: schedule, at: now)
+            if blockEnd == nil || endTime > blockEnd! {
+                blockEnd = endTime
             }
         }
 
@@ -133,20 +178,32 @@ class ScheduleManager: ObservableObject {
         // Check if we've passed the (possibly extended) end time
         if shouldBlock, let end = blockEnd, now >= end {
             shouldBlock = false
+            currentActiveSchedule = nil
         }
 
         if shouldBlock != isBlocking {
             isBlocking = shouldBlock
             currentBlockEndTime = blockEnd
+            activeSchedule = currentActiveSchedule
 
             if shouldBlock {
+                isManualBlock = false  // This is a scheduled block, not manual
+                currentBlockStartTime = now
+                StatsManager.shared.startBlock(scheduleName: currentActiveSchedule?.name ?? "Unknown")
                 OverlayWindowController.shared.showOverlay()
             } else {
+                StatsManager.shared.endBlock(reason: .completed)
                 OverlayWindowController.shared.hideOverlay()
+                currentBlockStartTime = nil
                 currentBlockEndTime = nil
+                activeSchedule = nil
+                isManualBlock = false
             }
         } else if shouldBlock {
             currentBlockEndTime = blockEnd
+            activeSchedule = currentActiveSchedule
+            // Ensure stats are recording (e.g., after wake from sleep when record was dropped)
+            StatsManager.shared.startBlock(scheduleName: currentActiveSchedule?.name ?? "Unknown")
         }
 
         updateNextBlockTime()
@@ -155,16 +212,46 @@ class ScheduleManager: ObservableObject {
     private func updateNextBlockTime() {
         let now = Date()
         var earliest: Date?
+        var earliestSchedule: Schedule?
 
         for schedule in schedules {
             if let next = schedule.nextStart(after: now) {
                 if earliest == nil || next < earliest! {
                     earliest = next
+                    earliestSchedule = schedule
                 }
             }
         }
 
         nextBlockStartTime = earliest
+        nextSchedule = earliestSchedule
+    }
+
+    /// Compute a schedule's natural end time (without snooze extensions)
+    private func computeScheduleEndTime(for schedule: Schedule, at now: Date) -> Date {
+        let calendar = Calendar.current
+        var components = calendar.dateComponents([.year, .month, .day], from: now)
+        components.hour = schedule.endHour
+        components.minute = schedule.endMinute
+        components.second = 0
+
+        guard let endTime = calendar.date(from: components) else { return now }
+
+        let isOvernight = schedule.endHour < schedule.startHour ||
+            (schedule.endHour == schedule.startHour && schedule.endMinute <= schedule.startMinute)
+
+        if isOvernight {
+            let currentHour = calendar.component(.hour, from: now)
+            let currentMinute = calendar.component(.minute, from: now)
+            let currentMinutes = currentHour * 60 + currentMinute
+
+            // Only add a day if we're before midnight (after start time)
+            if currentMinutes >= schedule.startHour * 60 + schedule.startMinute {
+                return calendar.date(byAdding: .day, value: 1, to: endTime) ?? endTime
+            }
+        }
+
+        return endTime
     }
 
     // MARK: - Snooze
@@ -172,6 +259,9 @@ class ScheduleManager: ObservableObject {
     func snooze(minutes: Int = 5) {
         let now = Date()
         snoozeEndTime = now.addingTimeInterval(TimeInterval(minutes * 60))
+
+        // Record the postponement before hiding
+        StatsManager.shared.recordPostponement()
 
         // Extend the block end time
         if let currentEnd = currentBlockEndTime {
@@ -199,6 +289,91 @@ class ScheduleManager: ObservableObject {
     func deleteSchedule(_ schedule: Schedule) {
         schedules.removeAll { $0.id == schedule.id }
         saveSchedules()
+    }
+
+    /// Manually start a block using the given schedule's end time
+    func startManualBlock(from schedule: Schedule) {
+        let now = Date()
+
+        // Check if we're resuming from snooze (preserve extended end time)
+        let isResumingFromSnooze = snoozeEndTime != nil && activeSchedule?.id == schedule.id
+
+        manualBlockSchedule = schedule
+        currentBlockStartTime = now
+
+        // Preserve extended end time if resuming from snooze, otherwise compute fresh
+        if !isResumingFromSnooze || currentBlockEndTime == nil {
+            currentBlockEndTime = computeNextEndTime(for: schedule, at: now)
+        }
+
+        activeSchedule = schedule
+        isBlocking = true
+        isManualBlock = true
+        snoozeEndTime = nil
+
+        // Only start new stats record if not resuming from snooze
+        if !isResumingFromSnooze {
+            StatsManager.shared.startBlock(scheduleName: schedule.name)
+        }
+        OverlayWindowController.shared.showOverlay()
+    }
+
+    /// Compute the next valid end time for a schedule (today if not passed, otherwise tomorrow)
+    private func computeNextEndTime(for schedule: Schedule, at now: Date) -> Date {
+        let calendar = Calendar.current
+        var components = calendar.dateComponents([.year, .month, .day], from: now)
+        components.hour = schedule.endHour
+        components.minute = schedule.endMinute
+        components.second = 0
+
+        guard let endTime = calendar.date(from: components) else { return now }
+
+        // If end time has already passed today (with 1 minute buffer), use tomorrow
+        if endTime.timeIntervalSince(now) < 60 {
+            return calendar.date(byAdding: .day, value: 1, to: endTime) ?? endTime
+        }
+
+        return endTime
+    }
+
+    /// Stop a manual block immediately
+    func stopManualBlock() {
+        StatsManager.shared.endBlock(reason: .exited)
+
+        // Mark schedule as exited to prevent immediate re-trigger if within scheduled window
+        if let schedule = activeSchedule {
+            let scheduleEndTime = computeScheduleEndTime(for: schedule, at: Date())
+            exitedSchedules[schedule.id] = scheduleEndTime
+        }
+
+        manualBlockSchedule = nil
+        currentBlockStartTime = nil
+        currentBlockEndTime = nil
+        activeSchedule = nil
+        isBlocking = false
+        isManualBlock = false
+
+        OverlayWindowController.shared.hideOverlay()
+    }
+
+    /// Exit a scheduled block early (user chose to exit)
+    func exitBlockEarly() {
+        StatsManager.shared.endBlock(reason: .exited)
+
+        // Mark this specific schedule as exited until its natural end time (not extended by snooze)
+        if let schedule = activeSchedule {
+            let scheduleEndTime = computeScheduleEndTime(for: schedule, at: Date())
+            exitedSchedules[schedule.id] = scheduleEndTime
+        }
+
+        manualBlockSchedule = nil
+        currentBlockStartTime = nil
+        currentBlockEndTime = nil
+        activeSchedule = nil
+        isBlocking = false
+        isManualBlock = false
+
+        OverlayWindowController.shared.hideOverlay()
     }
 
     // MARK: - Notifications
@@ -243,21 +418,39 @@ class ScheduleManager: ObservableObject {
 
     // MARK: - Helpers
 
+    /// Whether a block is currently snoozed (will resume when snoozeEndTime is reached)
+    var isSnoozed: Bool {
+        guard let snoozeEnd = snoozeEndTime else { return false }
+        return Date() < snoozeEnd
+    }
+
     var timeUntilNextBlock: String? {
-        guard let next = nextBlockStartTime else { return nil }
-
         let now = Date()
-        let interval = next.timeIntervalSince(now)
 
+        // If snoozed, show time until snooze ends (block resumes)
+        if let snoozeEnd = snoozeEndTime, now < snoozeEnd {
+            return formatInterval(snoozeEnd.timeIntervalSince(now))
+        }
+
+        // Otherwise show time until next scheduled block
+        guard let next = nextBlockStartTime else { return nil }
+        let interval = next.timeIntervalSince(now)
         guard interval > 0 else { return nil }
 
+        return formatInterval(interval)
+    }
+
+    private func formatInterval(_ interval: TimeInterval) -> String {
         let hours = Int(interval) / 3600
         let minutes = (Int(interval) % 3600) / 60
+        let seconds = Int(interval) % 60
 
         if hours > 0 {
             return "\(hours)h \(minutes)m"
-        } else {
+        } else if minutes > 0 {
             return "\(minutes)m"
+        } else {
+            return "\(seconds)s"
         }
     }
 }
