@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import AppKit
 
 class ScheduleManager: ObservableObject {
     static let shared = ScheduleManager()
@@ -93,6 +94,16 @@ class ScheduleManager: ObservableObject {
         }
         checkTimer?.tolerance = 0.1
 
+        // Observe system wake to immediately reconcile schedule state
+        // (timers don't fire during sleep, so state may be stale after wake)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleSystemWake()
+        }
+
         // Defer initial check to avoid recursive lock during singleton initialization
         // (OverlayView accesses ScheduleManager.shared, which would deadlock if still initializing)
         DispatchQueue.main.async { [weak self] in
@@ -100,6 +111,25 @@ class ScheduleManager: ObservableObject {
             self?.pruneStaleDeliveredNotifications()
             self?.scheduleUpcomingNotifications()
         }
+    }
+
+    /// Handle system wake - immediately reconcile schedule state
+    private func handleSystemWake() {
+        // Timers don't fire during sleep, so schedule state may be stale.
+        // Force an immediate check to show/hide overlay as appropriate.
+        checkSchedules()
+
+        // If blocking but overlay windows may have been torn down during sleep,
+        // ensure they exist by refreshing the overlay
+        if isBlocking {
+            OverlayWindowController.shared.ensureOverlayVisible()
+        }
+
+        // Re-schedule notifications (some may have been missed during sleep)
+        scheduleUpcomingNotifications()
+
+        // Clean up any stale delivered notifications
+        pruneStaleDeliveredNotifications()
     }
 
     private func checkSchedules() {

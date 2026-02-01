@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import Combine
 
-class OverlayWindowController {
+class OverlayWindowController: ObservableObject {
     static let shared = OverlayWindowController()
 
     private var overlayWindows: [NSWindow] = []
@@ -10,7 +10,10 @@ class OverlayWindowController {
     private let fadeDuration: TimeInterval = 1.0
     private let contentDelay: TimeInterval = 0.5
 
-    // Notifications for coordinating content fade
+    // State-driven content visibility (fallback for missed notifications)
+    @Published var shouldShowContent: Bool = false
+
+    // Notifications for coordinating content fade (still used for animation timing)
     static let contentFadeInNotification = Notification.Name("OverlayContentFadeIn")
     static let contentFadeOutNotification = Notification.Name("OverlayContentFadeOut")
 
@@ -60,13 +63,18 @@ class OverlayWindowController {
         }
 
         // After delay, fade in content
-        DispatchQueue.main.asyncAfter(deadline: .now() + contentDelay) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + contentDelay) { [weak self] in
+            // Guard against stale closure: if hideOverlay() was called before this fires,
+            // don't flip state back to true
+            guard let self = self, self.isShowingOverlay else { return }
+            self.shouldShowContent = true
             NotificationCenter.default.post(name: Self.contentFadeInNotification, object: nil)
         }
     }
 
     func hideOverlay() {
         isShowingOverlay = false
+        shouldShowContent = false
         let windowsToHide = overlayWindows
         overlayWindows.removeAll()
 
@@ -89,6 +97,16 @@ class OverlayWindowController {
         }
     }
 
+    /// Ensure overlay is visible if it should be (defensive check for post-wake scenarios)
+    func ensureOverlayVisible() {
+        guard isShowingOverlay else { return }
+
+        // If we have no windows but should be showing, refresh
+        if overlayWindows.isEmpty {
+            refreshOverlay()
+        }
+    }
+
     /// Refresh overlay without animation (for screen configuration changes)
     private func refreshOverlay() {
         for window in overlayWindows {
@@ -102,7 +120,8 @@ class OverlayWindowController {
             overlayWindows.append(window)
             window.orderFrontRegardless()
         }
-        // Content should already be visible for refresh
+        // Content should already be visible for refresh - set state before posting notification
+        shouldShowContent = true
         NotificationCenter.default.post(name: Self.contentFadeInNotification, object: nil)
     }
 
@@ -132,6 +151,7 @@ class OverlayWindowController {
 
 struct OverlayView: View {
     @ObservedObject private var manager = ScheduleManager.shared
+    @ObservedObject private var overlayController = OverlayWindowController.shared
     @State private var currentTime = Date()
     @State private var showExitConfirmation = false
     @State private var contentOpacity: Double = 0
@@ -244,6 +264,34 @@ struct OverlayView: View {
             // Keep cached values during fade out
             withAnimation(.easeInOut(duration: 1.0)) {
                 contentOpacity = 0
+            }
+        }
+        .onAppear {
+            // Fallback: if content should be visible but opacity is 0, fade in immediately.
+            // This handles the race condition where the fade-in notification was posted
+            // before this view subscribed (common after system wake).
+            if overlayController.shouldShowContent && contentOpacity == 0 {
+                displayName = manager.activeSchedule?.name ?? "Time for a Break"
+                displayMessage = manager.activeSchedule?.message ?? ""
+                displayEndTime = manager.currentBlockEndTime
+                withAnimation(.easeInOut(duration: 1.0)) {
+                    contentOpacity = 1
+                }
+            }
+        }
+        .onChange(of: overlayController.shouldShowContent) { shouldShow in
+            // State-driven fallback: if state changes and we missed the notification
+            if shouldShow && contentOpacity == 0 {
+                displayName = manager.activeSchedule?.name ?? "Time for a Break"
+                displayMessage = manager.activeSchedule?.message ?? ""
+                displayEndTime = manager.currentBlockEndTime
+                withAnimation(.easeInOut(duration: 1.0)) {
+                    contentOpacity = 1
+                }
+            } else if !shouldShow && contentOpacity > 0 {
+                withAnimation(.easeInOut(duration: 1.0)) {
+                    contentOpacity = 0
+                }
             }
         }
         .alert("Exit Block Early?", isPresented: $showExitConfirmation) {
