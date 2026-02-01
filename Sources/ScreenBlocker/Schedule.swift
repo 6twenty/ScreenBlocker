@@ -20,7 +20,7 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
         endHour: Int = 9,
         endMinute: Int = 30,
         enabledDays: Set<Weekday> = Set(Weekday.allCases),
-        isEnabled: Bool = true
+        isEnabled: Bool = false
     ) {
         self.id = id
         self.name = name

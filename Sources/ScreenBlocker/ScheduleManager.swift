@@ -33,27 +33,8 @@ class ScheduleManager: ObservableObject {
 
     private func loadSchedules() {
         guard let data = UserDefaults.standard.data(forKey: schedulesKey) else {
-            // First run - use default schedules for demo
-            schedules = [
-                Schedule(
-                    name: "Morning Break",
-                    message: "Take a 15 minute walk",
-                    startHour: 10,
-                    startMinute: 30,
-                    endHour: 10,
-                    endMinute: 45,
-                    enabledDays: Set([.monday, .tuesday, .wednesday, .thursday, .friday])
-                ),
-                Schedule(
-                    name: "Lunch",
-                    message: "Time for lunch and practice drums",
-                    startHour: 13,
-                    startMinute: 0,
-                    endHour: 14,
-                    endMinute: 0,
-                    enabledDays: Set([.monday, .tuesday, .wednesday, .thursday, .friday])
-                )
-            ]
+            // First run - start with empty schedules, user will create their own
+            schedules = []
             return
         }
 
