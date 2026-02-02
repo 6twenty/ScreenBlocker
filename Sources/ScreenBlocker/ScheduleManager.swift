@@ -19,6 +19,7 @@ class ScheduleManager: ObservableObject {
     private var checkTimer: Timer?
     private var manualBlockSchedule: Schedule?
     private var exitedSchedules: [UUID: Date] = [:]  // Schedule ID -> suppressed until time
+    private var snoozedScheduleID: UUID?  // Track which schedule was snoozed for reliable resume
 
     private let schedulesKey = "ScreenBlocker.schedules"
     private let notificationLeadTimeKey = "ScreenBlocker.notificationLeadTime"
@@ -153,6 +154,7 @@ class ScheduleManager: ObservableObject {
                 currentBlockStartTime = nil
                 currentBlockEndTime = nil
                 activeSchedule = nil
+                snoozedScheduleID = nil
                 OverlayWindowController.shared.hideOverlay()
             }
         }
@@ -164,6 +166,22 @@ class ScheduleManager: ObservableObject {
         var shouldBlock = false
         var blockEnd: Date?
         var currentActiveSchedule: Schedule?
+
+        // Check for resumed postponed block (snooze expired but extended end time not yet reached)
+        if let scheduleID = snoozedScheduleID {
+            if let endTime = currentBlockEndTime,
+               now < endTime,
+               let schedule = schedules.first(where: { $0.id == scheduleID && $0.isEnabled }),
+               exitedSchedules[scheduleID] == nil || exitedSchedules[scheduleID]! <= now {
+                // Resume the postponed block
+                shouldBlock = true
+                blockEnd = endTime
+                currentActiveSchedule = schedule
+            } else if currentBlockEndTime == nil || now >= currentBlockEndTime! {
+                // Snooze period is over or schedule no longer valid - clear state
+                snoozedScheduleID = nil
+            }
+        }
 
         for schedule in schedules where schedule.isActive(at: now) {
             // Skip schedules that were manually exited (until their natural end time)
@@ -209,6 +227,7 @@ class ScheduleManager: ObservableObject {
                 currentBlockStartTime = nil
                 currentBlockEndTime = nil
                 activeSchedule = nil
+                snoozedScheduleID = nil
                 isManualBlock = false
             }
         } else if shouldBlock {
@@ -271,6 +290,7 @@ class ScheduleManager: ObservableObject {
     func snooze(minutes: Int = 5) {
         let now = Date()
         snoozeEndTime = now.addingTimeInterval(TimeInterval(minutes * 60))
+        snoozedScheduleID = activeSchedule?.id  // Track for reliable resume after snooze
 
         // Record the postponement before hiding
         StatsManager.shared.recordPostponement()
@@ -368,6 +388,7 @@ class ScheduleManager: ObservableObject {
         currentBlockStartTime = nil
         currentBlockEndTime = nil
         activeSchedule = nil
+        snoozedScheduleID = nil
         isBlocking = false
         isManualBlock = false
 
@@ -388,6 +409,7 @@ class ScheduleManager: ObservableObject {
         currentBlockStartTime = nil
         currentBlockEndTime = nil
         activeSchedule = nil
+        snoozedScheduleID = nil
         isBlocking = false
         isManualBlock = false
 
