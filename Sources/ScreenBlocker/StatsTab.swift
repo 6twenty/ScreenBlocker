@@ -3,8 +3,8 @@ import SwiftUI
 struct StatsTab: View {
     @State private var selectedPeriod: StatsPeriod = .day
     @State private var offset: Int = 0
-    @State private var records: [BlockRecord] = []
-    @State private var totalDuration: TimeInterval = 0
+    @State private var sessions: [BlockSession] = []
+    @State private var totals: BlockTotals = BlockTotals()
 
     // Cached formatters (DateFormatter is expensive to create)
     private static let timeFormatter: DateFormatter = {
@@ -65,31 +65,61 @@ struct StatsTab: View {
                 }
             }
 
-            // Total duration
-            VStack(spacing: 4) {
-                Text("Total Block Time")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+            // Totals display
+            VStack(spacing: 12) {
+                // Main total - active blocking time
+                VStack(spacing: 4) {
+                    Text("Total Block Time")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
 
-                Text(formatDuration(totalDuration))
-                    .font(.system(size: 48, weight: .medium, design: .rounded))
+                    Text(formatDuration(totals.active))
+                        .font(.system(size: 48, weight: .medium, design: .rounded))
+                }
+
+                // Secondary metrics
+                if totals.snoozed > 0 || totals.sleeping > 0 {
+                    HStack(spacing: 24) {
+                        if totals.snoozed > 0 {
+                            VStack(spacing: 2) {
+                                Text("Snoozed")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(formatDuration(totals.snoozed))
+                                    .font(.system(.body, design: .monospaced))
+                                    .foregroundColor(.orange)
+                            }
+                        }
+
+                        if totals.sleeping > 0 {
+                            VStack(spacing: 2) {
+                                Text("Sleeping")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(formatDuration(totals.sleeping))
+                                    .font(.system(.body, design: .monospaced))
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                    }
+                }
             }
             .padding(.vertical, 20)
 
             Divider()
 
-            // Records list
-            if records.isEmpty {
+            // Sessions list
+            if sessions.isEmpty {
                 Text("No blocks recorded for this period")
                     .foregroundColor(.secondary)
                     .frame(maxHeight: .infinity)
             } else {
-                List(records) { record in
+                List(sessions) { session in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(record.scheduleName)
+                            Text(session.scheduleName)
                                 .fontWeight(.medium)
-                            Text(formatRecordTime(record))
+                            Text(formatSessionTime(session))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -97,10 +127,20 @@ struct StatsTab: View {
                         Spacer()
 
                         HStack(spacing: 8) {
-                            Text(formatDuration(record.duration))
+                            Text(formatDuration(sessionActiveTime(session)))
                                 .font(.system(.body, design: .monospaced))
 
-                            reasonBadge(for: record.reason)
+                            if let reason = session.endReason {
+                                reasonBadge(for: reason)
+                            } else {
+                                Text("Active")
+                                    .font(.caption)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.blue.opacity(0.2))
+                                    .foregroundColor(.blue)
+                                    .cornerRadius(4)
+                            }
                         }
                     }
                     .padding(.vertical, 4)
@@ -123,17 +163,9 @@ struct StatsTab: View {
     }
 
     private func loadStats() {
-        let (startDate, endDate) = selectedPeriod.dateRange(from: Date(), offset: offset)
-        let loadedRecords = StatsManager.shared.records(for: selectedPeriod, offset: offset)
-
-        records = loadedRecords.sorted { $0.start > $1.start }
-
-        // Compute total from already-loaded records (avoids re-reading files)
-        totalDuration = loadedRecords.reduce(0) { total, record in
-            let clampedStart = max(record.start, startDate)
-            let clampedEnd = min(record.end, endDate)
-            return total + clampedEnd.timeIntervalSince(clampedStart)
-        }
+        sessions = StatsManager.shared.sessions(for: selectedPeriod, offset: offset)
+            .sorted { $0.createdAt > $1.createdAt }
+        totals = StatsManager.shared.totals(for: selectedPeriod, offset: offset)
     }
 
     private func formatDuration(_ interval: TimeInterval) -> String {
@@ -147,27 +179,52 @@ struct StatsTab: View {
         }
     }
 
-    private func formatRecordTime(_ record: BlockRecord) -> String {
-        let startStr = Self.timeFormatter.string(from: record.start)
-        let endStr = Self.timeFormatter.string(from: record.end)
+    private func formatSessionTime(_ session: BlockSession) -> String {
+        let startStr = Self.timeFormatter.string(from: session.createdAt)
+        let endTime = session.events.last?.timestamp ?? session.createdAt
+        let endStr = Self.timeFormatter.string(from: endTime)
 
         if selectedPeriod != .day {
-            let dateStr = Self.dateFormatter.string(from: record.start)
+            let dateStr = Self.dateFormatter.string(from: session.createdAt)
             return "\(dateStr), \(startStr) – \(endStr)"
         }
 
         return "\(startStr) – \(endStr)"
     }
 
+    /// Calculate only the active (blocking) time for a session
+    private func sessionActiveTime(_ session: BlockSession) -> TimeInterval {
+        var activeTime: TimeInterval = 0
+        let events = session.events
+
+        for i in 0..<events.count {
+            let event = events[i]
+            guard event.state == .active else { continue }
+
+            let nextTimestamp: Date
+            if i + 1 < events.count {
+                nextTimestamp = events[i + 1].timestamp
+            } else {
+                nextTimestamp = Date()
+            }
+
+            activeTime += nextTimestamp.timeIntervalSince(event.timestamp)
+        }
+
+        return activeTime
+    }
+
     @ViewBuilder
-    private func reasonBadge(for reason: BlockEndReason) -> some View {
+    private func reasonBadge(for reason: EndReason) -> some View {
         let (text, color): (String, Color) = switch reason {
         case .completed:
             ("Completed", .green)
-        case .postponed:
-            ("Postponed", .orange)
         case .exited:
             ("Exited", .red)
+        case .cancelled:
+            ("Cancelled", .orange)
+        case .error:
+            ("Error", .gray)
         }
 
         Text(text)

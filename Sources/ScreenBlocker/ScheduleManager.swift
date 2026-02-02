@@ -76,9 +76,20 @@ class ScheduleManager: ObservableObject {
         }
         checkTimer?.tolerance = 0.1
 
+        let workspace = NSWorkspace.shared.notificationCenter
+
+        // Observe system sleep to pause stats tracking
+        workspace.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleSystemSleep()
+        }
+
         // Observe system wake to immediately reconcile schedule state
         // (timers don't fire during sleep, so state may be stale after wake)
-        NSWorkspace.shared.notificationCenter.addObserver(
+        workspace.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
             queue: .main
@@ -95,11 +106,19 @@ class ScheduleManager: ObservableObject {
         }
     }
 
+    /// Handle system sleep - pause stats if blocking
+    private func handleSystemSleep() {
+        if isBlocking || snoozeEndTime != nil {
+            StatsManager.shared.pauseForSleep()
+        }
+    }
+
     /// Handle system wake - immediately reconcile schedule state
     private func handleSystemWake() {
         // Timers don't fire during sleep, so schedule state may be stale.
         // Force an immediate check to show/hide overlay as appropriate.
-        checkSchedules()
+        // Note: checkSchedules() handles resuming stats from sleep based on actual state
+        checkSchedules(isWakingFromSleep: true)
 
         // If blocking but overlay windows may have been torn down during sleep,
         // ensure they exist by refreshing the overlay
@@ -114,8 +133,11 @@ class ScheduleManager: ObservableObject {
         pruneStaleDeliveredNotifications()
     }
 
-    private func checkSchedules() {
+    private func checkSchedules(isWakingFromSleep: Bool = false) {
         let now = Date()
+
+        // Track if we're resuming from snooze this tick
+        var resumingFromSnooze = false
 
         // Check if we're in snooze mode
         if let snoozeEnd = snoozeEndTime, now < snoozeEnd {
@@ -124,11 +146,16 @@ class ScheduleManager: ObservableObject {
                 isBlocking = false
                 OverlayWindowController.shared.hideOverlay()
             }
+            // If waking from sleep while snoozed, resume to snoozed state
+            if isWakingFromSleep {
+                StatsManager.shared.resumeFromSleep(to: .snoozed)
+            }
             updateNextBlockTime()
             return
         } else if snoozeEndTime != nil {
             // Snooze expired - clear snooze state
             snoozeEndTime = nil
+            resumingFromSnooze = true
             // Clear block start time so fresh blocks get a new start time
             // (if the block resumes, it will be set below; if not, we need it cleared)
             currentBlockStartTime = nil
@@ -141,13 +168,16 @@ class ScheduleManager: ObservableObject {
                 if !isBlocking {
                     isBlocking = true
                     activeSchedule = manualSchedule
+                    if resumingFromSnooze {
+                        StatsManager.shared.resumeFromSnooze()
+                    }
                     OverlayWindowController.shared.showOverlay()
                 }
                 updateNextBlockTime()
                 return
             } else {
                 // Manual block ended naturally (timed out)
-                StatsManager.shared.endBlock(reason: .completed)
+                StatsManager.shared.endSession(reason: .completed)
                 manualBlockSchedule = nil
                 isManualBlock = false
                 isBlocking = false
@@ -178,8 +208,12 @@ class ScheduleManager: ObservableObject {
                 blockEnd = endTime
                 currentActiveSchedule = schedule
             } else if currentBlockEndTime == nil || now >= currentBlockEndTime! {
-                // Snooze period is over or schedule no longer valid - clear state
+                // Snooze period is over or schedule no longer valid - end the session
+                if resumingFromSnooze {
+                    StatsManager.shared.endSession(reason: .cancelled)
+                }
                 snoozedScheduleID = nil
+                currentBlockEndTime = nil
             }
         }
 
@@ -219,10 +253,16 @@ class ScheduleManager: ObservableObject {
             if shouldBlock {
                 isManualBlock = false  // This is a scheduled block, not manual
                 currentBlockStartTime = now
-                StatsManager.shared.startBlock(scheduleName: currentActiveSchedule?.name ?? "Unknown")
+                if isWakingFromSleep {
+                    StatsManager.shared.resumeFromSleep(to: .active)
+                } else if resumingFromSnooze {
+                    StatsManager.shared.resumeFromSnooze()
+                } else {
+                    StatsManager.shared.startSession(scheduleName: currentActiveSchedule?.name ?? "Unknown", scheduleID: currentActiveSchedule?.id)
+                }
                 OverlayWindowController.shared.showOverlay()
             } else {
-                StatsManager.shared.endBlock(reason: .completed)
+                StatsManager.shared.endSession(reason: .completed)
                 OverlayWindowController.shared.hideOverlay()
                 currentBlockStartTime = nil
                 currentBlockEndTime = nil
@@ -233,8 +273,11 @@ class ScheduleManager: ObservableObject {
         } else if shouldBlock {
             currentBlockEndTime = blockEnd
             activeSchedule = currentActiveSchedule
-            // Ensure stats are recording (e.g., after wake from sleep when record was dropped)
-            StatsManager.shared.startBlock(scheduleName: currentActiveSchedule?.name ?? "Unknown")
+        }
+
+        // If waking from sleep with an open session but nothing is blocking, end the session
+        if isWakingFromSleep && !shouldBlock && StatsManager.shared.hasActiveSession {
+            StatsManager.shared.endSession(reason: .completed)
         }
 
         updateNextBlockTime()
@@ -292,8 +335,8 @@ class ScheduleManager: ObservableObject {
         snoozeEndTime = now.addingTimeInterval(TimeInterval(minutes * 60))
         snoozedScheduleID = activeSchedule?.id  // Track for reliable resume after snooze
 
-        // Record the postponement before hiding
-        StatsManager.shared.recordPostponement()
+        // Pause stats tracking during snooze
+        StatsManager.shared.pauseForSnooze()
 
         // Extend the block end time
         if let currentEnd = currentBlockEndTime {
@@ -349,9 +392,11 @@ class ScheduleManager: ObservableObject {
         isManualBlock = true
         snoozeEndTime = nil
 
-        // Only start new stats record if not resuming from snooze
-        if !isResumingFromSnooze {
-            StatsManager.shared.startBlock(scheduleName: schedule.name)
+        // Resume from snooze or start new session
+        if isResumingFromSnooze {
+            StatsManager.shared.resumeFromSnooze()
+        } else {
+            StatsManager.shared.startSession(scheduleName: schedule.name, scheduleID: schedule.id)
         }
         OverlayWindowController.shared.showOverlay()
     }
@@ -376,7 +421,7 @@ class ScheduleManager: ObservableObject {
 
     /// Stop a manual block immediately
     func stopManualBlock() {
-        StatsManager.shared.endBlock(reason: .exited)
+        StatsManager.shared.endSession(reason: .exited)
 
         // Mark schedule as exited to prevent immediate re-trigger if within scheduled window
         if let schedule = activeSchedule {
@@ -397,7 +442,7 @@ class ScheduleManager: ObservableObject {
 
     /// Exit a scheduled block early (user chose to exit)
     func exitBlockEarly() {
-        StatsManager.shared.endBlock(reason: .exited)
+        StatsManager.shared.endSession(reason: .exited)
 
         // Mark this specific schedule as exited until its natural end time (not extended by snooze)
         if let schedule = activeSchedule {
