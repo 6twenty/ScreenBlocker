@@ -106,9 +106,12 @@ struct ExistingBehaviorTests {
         #expect(h.manager.isBlocking)
     }
 
-    @Test func manualBlockRunsUntilScheduleEnd() {
-        let schedule = makeSchedule((9, 0), (12, 0), enabled: false)
+    @Test func resumeAfterExitRunsUntilScheduleEnd() {
+        let schedule = makeSchedule((9, 0), (12, 0))
         let h = Harness(schedules: [schedule])
+        h.tick(at: date(2026, 10, 19, 9, 0))
+        setClock(date(2026, 10, 19, 10, 0))
+        h.manager.exitBlockEarly()
 
         setClock(date(2026, 10, 19, 11, 0))
         h.manager.startManualBlock(from: schedule)

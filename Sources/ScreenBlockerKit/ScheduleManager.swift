@@ -418,9 +418,16 @@ class ScheduleManager: ObservableObject {
         saveSchedules()
     }
 
-    /// Manually start a block using the given schedule's end time
+    /// Whether a schedule can be resumed: it's within its scheduled time (e.g. after exiting early),
+    /// or it's the block that's currently snoozed
+    func canResume(_ schedule: Schedule) -> Bool {
+        schedule.isActive(at: AppClock.now()) || (isSnoozed && activeSchedule?.id == schedule.id)
+    }
+
+    /// Resume an interrupted schedule now, running until the end of its current occurrence
     func startManualBlock(from schedule: Schedule) {
         let now = AppClock.now()
+        guard canResume(schedule) else { return }
 
         // Check if we're resuming from snooze (preserve extended end time)
         let isResumingFromSnooze = snoozeEndTime != nil && activeSchedule?.id == schedule.id
@@ -428,9 +435,9 @@ class ScheduleManager: ObservableObject {
         manualBlockSchedule = schedule
         currentBlockStartTime = now
 
-        // Preserve extended end time if resuming from snooze, otherwise compute fresh
+        // Preserve extended end time if resuming from snooze, otherwise use this occurrence's end
         if !isResumingFromSnooze || currentBlockEndTime == nil {
-            currentBlockEndTime = computeNextEndTime(for: schedule, at: now)
+            currentBlockEndTime = computeScheduleEndTime(for: schedule, at: now)
         }
 
         activeSchedule = schedule
@@ -448,24 +455,6 @@ class ScheduleManager: ObservableObject {
             stats.startSession(scheduleName: schedule.displayName, scheduleID: schedule.id)
         }
         overlay.showOverlay()
-    }
-
-    /// Compute the next valid end time for a schedule (today if not passed, otherwise tomorrow)
-    private func computeNextEndTime(for schedule: Schedule, at now: Date) -> Date {
-        let calendar = Calendar.current
-        var components = calendar.dateComponents([.year, .month, .day], from: now)
-        components.hour = schedule.endHour
-        components.minute = schedule.endMinute
-        components.second = 0
-
-        guard let endTime = calendar.date(from: components) else { return now }
-
-        // If end time has already passed today (with 1 minute buffer), use tomorrow
-        if endTime.timeIntervalSince(now) < 60 {
-            return calendar.date(byAdding: .day, value: 1, to: endTime) ?? endTime
-        }
-
-        return endTime
     }
 
     /// Exit the current block early, scheduled or manual (user chose to exit)

@@ -21,10 +21,14 @@ struct WakeHandlingTests {
     }
 
     @Test func wakeDuringManualBlockResumesActive() {
-        let schedule = makeSchedule((9, 0), (12, 0), enabled: false)
+        let schedule = makeSchedule((9, 0), (12, 0))
         let h = Harness(schedules: [schedule])
+        h.tick(at: date(2026, 10, 19, 9, 0))
+        setClock(date(2026, 10, 19, 9, 30))
+        h.manager.exitBlockEarly()
         setClock(date(2026, 10, 19, 10, 0))
         h.manager.startManualBlock(from: schedule)
+        #expect(h.manager.isManualBlock)
         h.sleep(at: date(2026, 10, 19, 10, 10))
         h.wake(at: date(2026, 10, 19, 10, 20))
 
@@ -44,10 +48,14 @@ struct WakeHandlingTests {
     }
 
     @Test func wakeWhenManualSnoozeExpiredDuringSleepResumesActive() {
-        let schedule = makeSchedule((9, 0), (12, 0), enabled: false)
+        let schedule = makeSchedule((9, 0), (12, 0))
         let h = Harness(schedules: [schedule])
+        h.tick(at: date(2026, 10, 19, 9, 0))
+        setClock(date(2026, 10, 19, 9, 30))
+        h.manager.exitBlockEarly()
         setClock(date(2026, 10, 19, 10, 0))
         h.manager.startManualBlock(from: schedule)
+        #expect(h.manager.isManualBlock)
         h.manager.snooze(minutes: 5)
         h.sleep(at: date(2026, 10, 19, 10, 1))
         h.wake(at: date(2026, 10, 19, 10, 30))
@@ -157,8 +165,9 @@ struct SnoozeEdgeCaseTests {
     }
 
     @Test func startingAnotherScheduleDuringSnoozeStartsFreshSession() {
+        // A ends last, so it names the combined block; B is in its window but suppressed by the snooze
         let a = makeSchedule((9, 0), (10, 0), name: "A")
-        let b = makeSchedule((14, 0), (15, 0), name: "B", enabled: false)
+        let b = makeSchedule((9, 0), (9, 45), name: "B")
         let h = Harness(schedules: [a, b])
         h.tick(at: date(2026, 10, 19, 9, 0))
         setClock(date(2026, 10, 19, 9, 1))
@@ -221,10 +230,9 @@ struct NotificationReplenishTests {
 @Suite(.serialized)
 struct StatsQueryTests {
     @Test func openOvernightSessionAppearsInToday() {
-        let schedule = makeSchedule((23, 0), (1, 0), enabled: false)
+        let schedule = makeSchedule((23, 0), (1, 0))
         let h = Harness(schedules: [schedule])
-        setClock(date(2026, 10, 19, 23, 0))
-        h.manager.startManualBlock(from: schedule)
+        h.tick(at: date(2026, 10, 19, 23, 0))
 
         setClock(date(2026, 10, 20, 0, 30))
         #expect(h.stats.sessions(for: .day).count == 1)

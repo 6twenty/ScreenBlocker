@@ -193,10 +193,17 @@ struct ScheduleEditorView: View {
             }
 
             Section {
-                Button(schedule.isActive(at: Date()) ? "Resume" : "Start Now") {
-                    manager.startManualBlock(from: schedule)
+                VStack(alignment: .leading, spacing: 6) {
+                    Button("Resume Block") {
+                        manager.startManualBlock(from: schedule)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!manager.canResume(schedule))
+
+                    Text("Picks this block back up after exiting or snoozing it. Available during its scheduled time.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
             }
         }
         .formStyle(.grouped)
