@@ -159,6 +159,16 @@ class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func quit() {
+        let manager = ScheduleManager.shared
+        if manager.isBlocking || manager.isSnoozed {
+            let alert = NSAlert()
+            alert.messageText = "Quit ScreenBlocker?"
+            alert.informativeText = "This ends the current block. It will be recorded as cancelled in your stats."
+            alert.addButton(withTitle: "Quit")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         NSApp.terminate(nil)
     }
 }
