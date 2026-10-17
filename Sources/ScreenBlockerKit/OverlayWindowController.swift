@@ -220,7 +220,7 @@ struct OverlayView: View {
                     Button(action: {
                         manager.snooze(minutes: 5)
                     }) {
-                        Text("5 More Minutes")
+                        Text("Snooze 5 Minutes")
                             .font(.title3.weight(.semibold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 20)
@@ -230,7 +230,7 @@ struct OverlayView: View {
                     }
                     .buttonStyle(.plain)
 
-                    Text("(adds 5 minutes to this block)")
+                    Text("The block will end 5 minutes later")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.5))
                 }
@@ -259,13 +259,7 @@ struct OverlayView: View {
             }
         }
         .onReceive(fadeInPublisher) { _ in
-            // Capture current values before fading in
-            displayName = manager.activeSchedule?.name ?? "Time for a Break"
-            displayMessage = manager.activeSchedule?.message ?? ""
-            displayEndTime = manager.currentBlockEndTime
-            withAnimation(.easeInOut(duration: 1.0)) {
-                contentOpacity = 1
-            }
+            fadeInContent()
         }
         .onReceive(fadeOutPublisher) { _ in
             // Keep cached values during fade out
@@ -278,23 +272,13 @@ struct OverlayView: View {
             // This handles the race condition where the fade-in notification was posted
             // before this view subscribed (common after system wake).
             if overlayController.shouldShowContent && contentOpacity == 0 {
-                displayName = manager.activeSchedule?.name ?? "Time for a Break"
-                displayMessage = manager.activeSchedule?.message ?? ""
-                displayEndTime = manager.currentBlockEndTime
-                withAnimation(.easeInOut(duration: 1.0)) {
-                    contentOpacity = 1
-                }
+                fadeInContent()
             }
         }
         .onChange(of: overlayController.shouldShowContent) { shouldShow in
             // State-driven fallback: if state changes and we missed the notification
             if shouldShow && contentOpacity == 0 {
-                displayName = manager.activeSchedule?.name ?? "Time for a Break"
-                displayMessage = manager.activeSchedule?.message ?? ""
-                displayEndTime = manager.currentBlockEndTime
-                withAnimation(.easeInOut(duration: 1.0)) {
-                    contentOpacity = 1
-                }
+                fadeInContent()
             } else if !shouldShow && contentOpacity > 0 {
                 withAnimation(.easeInOut(duration: 1.0)) {
                     contentOpacity = 0
@@ -303,18 +287,29 @@ struct OverlayView: View {
         }
         .alert("Exit Block Early?", isPresented: $showExitConfirmation) {
             Button("Cancel", role: .cancel) { }
-            Button("Postpone 10 Minutes") {
+            Button("Snooze 10 Minutes") {
                 manager.snooze(minutes: 10)
             }
             Button("Exit Block", role: .destructive) {
-                if manager.isManualBlock {
-                    manager.stopManualBlock()
-                } else {
-                    manager.exitBlockEarly()
-                }
+                manager.exitBlockEarly()
             }
         } message: {
-            Text("You can postpone for 10 minutes, or exit completely (which will be recorded in your stats).")
+            Text("Snoozing pauses the block for 10 minutes and moves its end time back to match. Exiting ends it now and is recorded in your stats.")
+        }
+    }
+
+    /// Capture the current block's details, then fade the content in
+    private func fadeInContent() {
+        if let schedule = manager.activeSchedule,
+           !schedule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            displayName = schedule.name
+        } else {
+            displayName = "Time for a Break"
+        }
+        displayMessage = manager.activeSchedule?.message ?? ""
+        displayEndTime = manager.currentBlockEndTime
+        withAnimation(.easeInOut(duration: 1.0)) {
+            contentOpacity = 1
         }
     }
 
@@ -371,7 +366,7 @@ struct ExitBlockButton: View {
         Button(action: action) {
             Image(systemName: "xmark.circle")
                 .font(.system(size: 18))
-                .foregroundColor(.white.opacity(isHovered ? 0.6 : 0.25))
+                .foregroundColor(.white.opacity(isHovered ? 0.7 : 0.4))
                 .frame(width: 32, height: 32)
                 .contentShape(Rectangle())
         }

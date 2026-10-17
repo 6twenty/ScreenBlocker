@@ -43,6 +43,12 @@ struct SettingsView: View {
                     Label("Stats", systemImage: "chart.bar")
                 }
                 .tag(1)
+
+            GeneralTab()
+                .tabItem {
+                    Label("General", systemImage: "gearshape")
+                }
+                .tag(2)
         }
         .frame(minWidth: 650, minHeight: 450)
     }

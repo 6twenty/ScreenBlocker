@@ -18,14 +18,14 @@ struct StatsTab: View {
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
+        formatter.setLocalizedDateFormatFromTemplate("MMMd")
         return formatter
     }()
 
     var body: some View {
         VStack(spacing: 20) {
             // Period selector
-            Picker("", selection: $selectedPeriod) {
+            Picker("Period", selection: $selectedPeriod) {
                 ForEach(StatsPeriod.allCases, id: \.self) { period in
                     Text(period.rawValue).tag(period)
                 }
@@ -45,6 +45,8 @@ struct StatsTab: View {
                         Image(systemName: "chevron.left")
                     }
                     .buttonStyle(.borderless)
+                    .help("Previous")
+                    .accessibilityLabel("Previous \(selectedPeriod.rawValue)")
 
                     Text(selectedPeriod.formatLabel(for: Date(), offset: offset))
                         .font(.headline)
@@ -55,6 +57,8 @@ struct StatsTab: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(offset >= 0)
+                    .help("Next")
+                    .accessibilityLabel("Next \(selectedPeriod.rawValue)")
                 }
 
                 if offset != 0 {
@@ -214,7 +218,7 @@ struct StatsTab: View {
         case .cancelled:
             ("Cancelled", .orange)
         case .error:
-            ("Error", .gray)
+            ("Interrupted", .gray)
         }
 
         badge(text, color: color)

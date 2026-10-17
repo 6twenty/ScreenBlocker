@@ -447,7 +447,7 @@ enum StatsPeriod: String, CaseIterable {
             if offset == 0 {
                 return "This Week"
             }
-            formatter.dateFormat = "MMM d"
+            formatter.setLocalizedDateFormatFromTemplate("MMMd")
             let startStr = formatter.string(from: start)
             let endDate = calendar.date(byAdding: .day, value: -1, to: end) ?? end
             let endStr = formatter.string(from: endDate)
@@ -457,14 +457,14 @@ enum StatsPeriod: String, CaseIterable {
             if offset == 0 {
                 return "This Month"
             }
-            formatter.dateFormat = "MMMM yyyy"
+            formatter.setLocalizedDateFormatFromTemplate("MMMMy")
             return formatter.string(from: start)
 
         case .year:
             if offset == 0 {
                 return "This Year"
             }
-            formatter.dateFormat = "yyyy"
+            formatter.setLocalizedDateFormatFromTemplate("y")
             return formatter.string(from: start)
         }
     }

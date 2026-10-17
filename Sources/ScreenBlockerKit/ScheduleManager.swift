@@ -299,7 +299,7 @@ class ScheduleManager: ObservableObject {
                     stats.resumeFromSnooze()
                 }
                 if !stats.hasActiveSession {
-                    stats.startSession(scheduleName: currentActiveSchedule?.name ?? "Unknown", scheduleID: currentActiveSchedule?.id)
+                    stats.startSession(scheduleName: currentActiveSchedule?.displayName ?? "Unknown", scheduleID: currentActiveSchedule?.id)
                 }
                 overlay.showOverlay()
             } else {
@@ -444,7 +444,7 @@ class ScheduleManager: ObservableObject {
             // Replacing a different (snoozed) block: close its session rather than reusing it
             stats.endSession(reason: .cancelled)
             snoozedScheduleID = nil
-            stats.startSession(scheduleName: schedule.name, scheduleID: schedule.id)
+            stats.startSession(scheduleName: schedule.displayName, scheduleID: schedule.id)
         }
         overlay.showOverlay()
     }
@@ -467,28 +467,7 @@ class ScheduleManager: ObservableObject {
         return endTime
     }
 
-    /// Stop a manual block immediately
-    func stopManualBlock() {
-        stats.endSession(reason: .exited)
-
-        // Mark schedule as exited to prevent immediate re-trigger if within scheduled window
-        if let schedule = activeSchedule {
-            let scheduleEndTime = computeScheduleEndTime(for: schedule, at: AppClock.now())
-            exitedSchedules[schedule.id] = scheduleEndTime
-        }
-
-        manualBlockSchedule = nil
-        currentBlockStartTime = nil
-        currentBlockEndTime = nil
-        activeSchedule = nil
-        snoozedScheduleID = nil
-        isBlocking = false
-        isManualBlock = false
-
-        overlay.hideOverlay()
-    }
-
-    /// Exit a scheduled block early (user chose to exit)
+    /// Exit the current block early, scheduled or manual (user chose to exit)
     func exitBlockEarly() {
         stats.endSession(reason: .exited)
 
@@ -558,7 +537,8 @@ class ScheduleManager: ObservableObject {
 
             let content = UNMutableNotificationContent()
             content.title = "Screen Block Starting Soon"
-            content.body = "\(schedule.name) begins in \(notificationLeadTime) minutes"
+            let minutes = notificationLeadTime == 1 ? "1 minute" : "\(notificationLeadTime) minutes"
+            content.body = "\(schedule.displayName) begins in \(minutes)"
             content.sound = .default
 
             let components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: notifyTime)

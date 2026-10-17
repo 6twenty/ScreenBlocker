@@ -133,7 +133,7 @@ struct ExistingBehaviorTests {
         h.tick(at: date(2026, 10, 19, 9, 0))
 
         setClock(date(2026, 10, 19, 9, 1))
-        h.manager.stopManualBlock()
+        h.manager.exitBlockEarly()
         #expect(!h.manager.isBlocking)
         #expect(h.savedSessions().last?.endReason == .exited)
 

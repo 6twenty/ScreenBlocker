@@ -68,12 +68,39 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
         }
     }
 
+    /// Name for display, falling back when the user left it blank
+    var displayName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled" : name
+    }
+
+    /// Start time formatted for the user's locale and 12/24-hour preference (e.g. "9:00 AM")
     var startTimeString: String {
-        String(format: "%d:%02d", startHour, startMinute)
+        Self.formatTime(hour: startHour, minute: startMinute)
     }
 
     var endTimeString: String {
-        String(format: "%d:%02d", endHour, endMinute)
+        Self.formatTime(hour: endHour, minute: endMinute)
+    }
+
+    /// e.g. "9:00 AM – 9:30 AM"
+    var timeRangeString: String {
+        "\(startTimeString) – \(endTimeString)"
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static func formatTime(hour: Int, minute: Int) -> String {
+        // Any fixed date works; Jan 1 avoids DST-skipped times
+        let components = DateComponents(year: 2001, month: 1, day: 1, hour: hour, minute: minute)
+        guard let date = Calendar.current.date(from: components) else {
+            return String(format: "%d:%02d", hour, minute)
+        }
+        return timeFormatter.string(from: date)
     }
 
     /// Returns the next occurrence of this schedule's start time, or nil if not applicable today
@@ -183,6 +210,17 @@ enum Weekday: Int, Codable, CaseIterable, Comparable {
     var shortName: String {
         let symbols = Calendar.current.shortWeekdaySymbols
         return symbols[rawValue - 1]  // rawValue is 1-based, array is 0-based
+    }
+
+    /// Locale-aware full weekday name (e.g., "Monday")
+    var fullName: String {
+        Calendar.current.weekdaySymbols[rawValue - 1]
+    }
+
+    /// All weekdays, starting from the user's first day of the week (e.g. Monday in NZ)
+    static var orderedForCurrentCalendar: [Weekday] {
+        let first = Calendar.current.firstWeekday
+        return (0..<7).compactMap { Weekday(rawValue: (first - 1 + $0) % 7 + 1) }
     }
 
     /// Locale-aware very short weekday name (e.g., "M", "Tu")

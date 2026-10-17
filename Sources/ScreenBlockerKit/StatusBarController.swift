@@ -53,7 +53,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(nextBlockMenuItem!)
 
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit ScreenBlocker", action: #selector(quit), keyEquivalent: "q"))
 
@@ -77,14 +77,29 @@ class StatusBarController: NSObject, NSMenuDelegate {
         formatter.timeStyle = .short
 
         if manager.isBlocking, let schedule = manager.activeSchedule {
-            nextBlockMenuItem?.title = "Currently blocking: \(schedule.name)"
+            nextBlockMenuItem?.title = "Currently blocking: \(schedule.displayName)"
         } else if manager.isSnoozed, let snoozeEnd = manager.snoozeEndTime, let schedule = manager.activeSchedule {
-            nextBlockMenuItem?.title = "Snoozed: \(schedule.name) resumes at \(formatter.string(from: snoozeEnd))"
+            nextBlockMenuItem?.title = "Snoozed: \(schedule.displayName) resumes at \(formatter.string(from: snoozeEnd))"
         } else if let nextTime = manager.nextBlockStartTime {
-            let nextScheduleName = manager.nextSchedule?.name ?? "Block"
-            nextBlockMenuItem?.title = "Next: \(nextScheduleName) at \(formatter.string(from: nextTime))"
+            let nextScheduleName = manager.nextSchedule?.displayName ?? "Block"
+            nextBlockMenuItem?.title = "Next: \(nextScheduleName) \(Self.describeStart(nextTime, timeFormatter: formatter))"
         } else {
             nextBlockMenuItem?.title = "No upcoming blocks"
+        }
+    }
+
+    /// "at 9:00 AM", "tomorrow at 9:00 AM", or "on Wednesday at 9:00 AM"
+    private static func describeStart(_ date: Date, timeFormatter: DateFormatter) -> String {
+        let calendar = Calendar.current
+        let time = timeFormatter.string(from: date)
+
+        if calendar.isDateInToday(date) {
+            return "at \(time)"
+        } else if calendar.isDateInTomorrow(date) {
+            return "tomorrow at \(time)"
+        } else {
+            let weekday = calendar.weekdaySymbols[calendar.component(.weekday, from: date) - 1]
+            return "on \(weekday) at \(time)"
         }
     }
 

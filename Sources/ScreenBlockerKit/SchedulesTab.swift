@@ -3,7 +3,6 @@ import SwiftUI
 struct SchedulesTab: View {
     @ObservedObject private var manager = ScheduleManager.shared
     @State private var selectedScheduleID: UUID?
-    @State private var isEditing = false
     @State private var showDeleteConfirmation = false
 
     private var selectedSchedule: Schedule? {
@@ -27,6 +26,11 @@ struct SchedulesTab: View {
                         selectedScheduleID = manager.schedules.first?.id
                     }
                 }
+                .onDeleteCommand {
+                    if selectedSchedule != nil {
+                        showDeleteConfirmation = true
+                    }
+                }
 
                 Divider()
 
@@ -35,12 +39,16 @@ struct SchedulesTab: View {
                         Image(systemName: "plus")
                     }
                     .buttonStyle(.borderless)
+                    .help("Add Schedule")
+                    .accessibilityLabel("Add Schedule")
 
                     Button(action: { showDeleteConfirmation = true }) {
                         Image(systemName: "minus")
                     }
                     .buttonStyle(.borderless)
                     .disabled(selectedSchedule == nil)
+                    .help("Delete Schedule")
+                    .accessibilityLabel("Delete Schedule")
 
                     Spacer()
                 }
@@ -54,7 +62,7 @@ struct SchedulesTab: View {
                 }
             } message: {
                 if let schedule = selectedSchedule {
-                    Text("Are you sure you want to delete \"\(schedule.name)\"?")
+                    Text("Are you sure you want to delete \"\(schedule.displayName)\"?")
                 }
             }
 
@@ -62,37 +70,19 @@ struct SchedulesTab: View {
             VStack {
                 if let schedule = selectedSchedule {
                     ScheduleEditorView(schedule: binding(for: schedule))
+                } else if manager.schedules.isEmpty {
+                    VStack(spacing: 6) {
+                        Text("No Schedules")
+                            .font(.title3)
+                        Text("Click + to add a schedule.")
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     Text("Select a schedule to edit")
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-
-                Divider()
-
-                // Global settings
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Notification Settings")
-                        .font(.headline)
-
-                    HStack {
-                        Text("Notify before block:")
-                        Picker("", selection: $manager.notificationLeadTime) {
-                            Text("Off").tag(0)
-                            Text("1 minute").tag(1)
-                            Text("5 minutes").tag(5)
-                            Text("10 minutes").tag(10)
-                            Text("15 minutes").tag(15)
-                        }
-                        .labelsHidden()
-                        .frame(width: 120)
-                        .onChange(of: manager.notificationLeadTime) { _ in
-                            manager.saveSettings()
-                        }
-                    }
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(minWidth: 400)
         }
@@ -128,7 +118,7 @@ struct ScheduleRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(schedule.name)
+                Text(schedule.displayName)
                     .fontWeight(.medium)
 
                 Spacer()
@@ -140,7 +130,7 @@ struct ScheduleRow: View {
                 }
             }
 
-            Text("\(schedule.startTimeString) - \(schedule.endTimeString)")
+            Text(schedule.timeRangeString)
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -165,18 +155,18 @@ struct ScheduleEditorView: View {
             Section("Time") {
                 HStack {
                     Text("Start:")
-                    TimePicker(hour: $schedule.startHour, minute: $schedule.startMinute)
+                    TimePicker(label: "Start time", hour: $schedule.startHour, minute: $schedule.startMinute)
 
                     Spacer().frame(width: 40)
 
                     Text("End:")
-                    TimePicker(hour: $schedule.endHour, minute: $schedule.endMinute)
+                    TimePicker(label: "End time", hour: $schedule.endHour, minute: $schedule.endMinute)
                 }
             }
 
             Section("Days") {
                 HStack(spacing: 8) {
-                    ForEach(Weekday.allCases, id: \.self) { day in
+                    ForEach(Weekday.orderedForCurrentCalendar, id: \.self) { day in
                         DayToggle(
                             day: day,
                             isSelected: schedule.enabledDays.contains(day),
@@ -223,18 +213,16 @@ struct ScheduleEditorView: View {
 }
 
 struct TimePicker: View {
+    let label: String
     @Binding var hour: Int
     @Binding var minute: Int
 
     private var timeBinding: Binding<Date> {
         Binding(
             get: {
-                let calendar = Calendar.current
-                var components = calendar.dateComponents([.year, .month, .day], from: Date())
-                components.hour = hour
-                components.minute = minute
-                components.second = 0
-                return calendar.date(from: components) ?? Date()
+                // A fixed date rather than today, so times skipped by a DST change can still be picked
+                let components = DateComponents(year: 2001, month: 1, day: 1, hour: hour, minute: minute)
+                return Calendar.current.date(from: components) ?? Date()
             },
             set: { newDate in
                 let components = Calendar.current.dateComponents([.hour, .minute], from: newDate)
@@ -245,7 +233,7 @@ struct TimePicker: View {
     }
 
     var body: some View {
-        DatePicker("", selection: timeBinding, displayedComponents: .hourAndMinute)
+        DatePicker(label, selection: timeBinding, displayedComponents: .hourAndMinute)
             .labelsHidden()
     }
 }
@@ -267,5 +255,7 @@ struct DayToggle: View {
                 .foregroundColor(isSelected ? .white : .primary)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(day.fullName)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
