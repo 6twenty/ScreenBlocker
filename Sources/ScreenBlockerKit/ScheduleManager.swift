@@ -3,7 +3,16 @@ import UserNotifications
 import AppKit
 
 class ScheduleManager: ObservableObject {
-    static let shared = ScheduleManager()
+    static let shared: ScheduleManager = {
+        let manager = ScheduleManager(
+            defaults: .standard,
+            stats: .shared,
+            overlay: OverlayWindowController.shared,
+            notificationCenter: SystemNotificationCenter()
+        )
+        manager.startMonitoring()
+        return manager
+    }()
 
     @Published var schedules: [Schedule] = []
     @Published var isBlocking: Bool = false
@@ -24,16 +33,30 @@ class ScheduleManager: ObservableObject {
     private let schedulesKey = "ScreenBlocker.schedules"
     private let notificationLeadTimeKey = "ScreenBlocker.notificationLeadTime"
 
-    private init() {
+    private let defaults: UserDefaults
+    private let stats: StatsManager
+    private let overlay: OverlayPresenting
+    private let notificationCenter: NotificationScheduling
+
+    /// Creates a manager without starting the monitoring timer (tests drive `checkSchedules` directly).
+    init(
+        defaults: UserDefaults,
+        stats: StatsManager,
+        overlay: OverlayPresenting,
+        notificationCenter: NotificationScheduling
+    ) {
+        self.defaults = defaults
+        self.stats = stats
+        self.overlay = overlay
+        self.notificationCenter = notificationCenter
         loadSchedules()
         loadSettings()
-        startMonitoring()
     }
 
     // MARK: - Persistence
 
     private func loadSchedules() {
-        guard let data = UserDefaults.standard.data(forKey: schedulesKey) else {
+        guard let data = defaults.data(forKey: schedulesKey) else {
             // First run - start with empty schedules, user will create their own
             schedules = []
             return
@@ -50,26 +73,26 @@ class ScheduleManager: ObservableObject {
 
     func saveSchedules() {
         if let data = try? JSONEncoder().encode(schedules) {
-            UserDefaults.standard.set(data, forKey: schedulesKey)
+            defaults.set(data, forKey: schedulesKey)
         }
         updateNextBlockTime()
         scheduleUpcomingNotifications()
     }
 
     private func loadSettings() {
-        if UserDefaults.standard.object(forKey: notificationLeadTimeKey) != nil {
-            notificationLeadTime = UserDefaults.standard.integer(forKey: notificationLeadTimeKey)
+        if defaults.object(forKey: notificationLeadTimeKey) != nil {
+            notificationLeadTime = defaults.integer(forKey: notificationLeadTimeKey)
         }
     }
 
     func saveSettings() {
-        UserDefaults.standard.set(notificationLeadTime, forKey: notificationLeadTimeKey)
+        defaults.set(notificationLeadTime, forKey: notificationLeadTimeKey)
         scheduleUpcomingNotifications()
     }
 
     // MARK: - Monitoring
 
-    private func startMonitoring() {
+    func startMonitoring() {
         // Check every second for accuracy
         checkTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.checkSchedules()
@@ -107,14 +130,14 @@ class ScheduleManager: ObservableObject {
     }
 
     /// Handle system sleep - pause stats if blocking
-    private func handleSystemSleep() {
+    func handleSystemSleep() {
         if isBlocking || snoozeEndTime != nil {
-            StatsManager.shared.pauseForSleep()
+            stats.pauseForSleep()
         }
     }
 
     /// Handle system wake - immediately reconcile schedule state
-    private func handleSystemWake() {
+    func handleSystemWake() {
         // Timers don't fire during sleep, so schedule state may be stale.
         // Force an immediate check to show/hide overlay as appropriate.
         // Note: checkSchedules() handles resuming stats from sleep based on actual state
@@ -123,7 +146,7 @@ class ScheduleManager: ObservableObject {
         // If blocking but overlay windows may have been torn down during sleep,
         // ensure they exist by refreshing the overlay
         if isBlocking {
-            OverlayWindowController.shared.ensureOverlayVisible()
+            overlay.ensureOverlayVisible()
         }
 
         // Re-schedule notifications (some may have been missed during sleep)
@@ -133,8 +156,8 @@ class ScheduleManager: ObservableObject {
         pruneStaleDeliveredNotifications()
     }
 
-    private func checkSchedules(isWakingFromSleep: Bool = false) {
-        let now = Date()
+    func checkSchedules(isWakingFromSleep: Bool = false) {
+        let now = AppClock.now()
 
         // Track if we're resuming from snooze this tick
         var resumingFromSnooze = false
@@ -144,11 +167,11 @@ class ScheduleManager: ObservableObject {
             // Still in snooze, don't block
             if isBlocking {
                 isBlocking = false
-                OverlayWindowController.shared.hideOverlay()
+                overlay.hideOverlay()
             }
             // If waking from sleep while snoozed, resume to snoozed state
             if isWakingFromSleep {
-                StatsManager.shared.resumeFromSleep(to: .snoozed)
+                stats.resumeFromSleep(to: .snoozed)
             }
             updateNextBlockTime()
             return
@@ -169,15 +192,15 @@ class ScheduleManager: ObservableObject {
                     isBlocking = true
                     activeSchedule = manualSchedule
                     if resumingFromSnooze {
-                        StatsManager.shared.resumeFromSnooze()
+                        stats.resumeFromSnooze()
                     }
-                    OverlayWindowController.shared.showOverlay()
+                    overlay.showOverlay()
                 }
                 updateNextBlockTime()
                 return
             } else {
                 // Manual block ended naturally (timed out)
-                StatsManager.shared.endSession(reason: .completed)
+                stats.endSession(reason: .completed)
                 manualBlockSchedule = nil
                 isManualBlock = false
                 isBlocking = false
@@ -185,7 +208,7 @@ class ScheduleManager: ObservableObject {
                 currentBlockEndTime = nil
                 activeSchedule = nil
                 snoozedScheduleID = nil
-                OverlayWindowController.shared.hideOverlay()
+                overlay.hideOverlay()
             }
         }
 
@@ -210,7 +233,7 @@ class ScheduleManager: ObservableObject {
             } else if currentBlockEndTime == nil || now >= currentBlockEndTime! {
                 // Snooze period is over or schedule no longer valid - end the session
                 if resumingFromSnooze {
-                    StatsManager.shared.endSession(reason: .cancelled)
+                    stats.endSession(reason: .cancelled)
                 }
                 snoozedScheduleID = nil
                 currentBlockEndTime = nil
@@ -254,16 +277,16 @@ class ScheduleManager: ObservableObject {
                 isManualBlock = false  // This is a scheduled block, not manual
                 currentBlockStartTime = now
                 if isWakingFromSleep {
-                    StatsManager.shared.resumeFromSleep(to: .active)
+                    stats.resumeFromSleep(to: .active)
                 } else if resumingFromSnooze {
-                    StatsManager.shared.resumeFromSnooze()
+                    stats.resumeFromSnooze()
                 } else {
-                    StatsManager.shared.startSession(scheduleName: currentActiveSchedule?.name ?? "Unknown", scheduleID: currentActiveSchedule?.id)
+                    stats.startSession(scheduleName: currentActiveSchedule?.name ?? "Unknown", scheduleID: currentActiveSchedule?.id)
                 }
-                OverlayWindowController.shared.showOverlay()
+                overlay.showOverlay()
             } else {
-                StatsManager.shared.endSession(reason: .completed)
-                OverlayWindowController.shared.hideOverlay()
+                stats.endSession(reason: .completed)
+                overlay.hideOverlay()
                 currentBlockStartTime = nil
                 currentBlockEndTime = nil
                 activeSchedule = nil
@@ -276,15 +299,15 @@ class ScheduleManager: ObservableObject {
         }
 
         // If waking from sleep with an open session but nothing is blocking, end the session
-        if isWakingFromSleep && !shouldBlock && StatsManager.shared.hasActiveSession {
-            StatsManager.shared.endSession(reason: .completed)
+        if isWakingFromSleep && !shouldBlock && stats.hasActiveSession {
+            stats.endSession(reason: .completed)
         }
 
         updateNextBlockTime()
     }
 
     private func updateNextBlockTime() {
-        let now = Date()
+        let now = AppClock.now()
         var earliest: Date?
         var earliestSchedule: Schedule?
 
@@ -331,12 +354,12 @@ class ScheduleManager: ObservableObject {
     // MARK: - Snooze
 
     func snooze(minutes: Int = 5) {
-        let now = Date()
+        let now = AppClock.now()
         snoozeEndTime = now.addingTimeInterval(TimeInterval(minutes * 60))
         snoozedScheduleID = activeSchedule?.id  // Track for reliable resume after snooze
 
         // Pause stats tracking during snooze
-        StatsManager.shared.pauseForSnooze()
+        stats.pauseForSnooze()
 
         // Extend the block end time
         if let currentEnd = currentBlockEndTime {
@@ -344,7 +367,7 @@ class ScheduleManager: ObservableObject {
         }
 
         isBlocking = false
-        OverlayWindowController.shared.hideOverlay()
+        overlay.hideOverlay()
     }
 
     // MARK: - Schedule Management
@@ -364,7 +387,7 @@ class ScheduleManager: ObservableObject {
     func deleteSchedule(_ schedule: Schedule) {
         // Remove notifications for this specific schedule (both pending and delivered)
         let identifier = "block-\(schedule.id.uuidString)"
-        let center = UNUserNotificationCenter.current()
+        let center = notificationCenter
         center.removePendingNotificationRequests(withIdentifiers: [identifier])
         center.removeDeliveredNotifications(withIdentifiers: [identifier])
 
@@ -374,7 +397,7 @@ class ScheduleManager: ObservableObject {
 
     /// Manually start a block using the given schedule's end time
     func startManualBlock(from schedule: Schedule) {
-        let now = Date()
+        let now = AppClock.now()
 
         // Check if we're resuming from snooze (preserve extended end time)
         let isResumingFromSnooze = snoozeEndTime != nil && activeSchedule?.id == schedule.id
@@ -394,11 +417,11 @@ class ScheduleManager: ObservableObject {
 
         // Resume from snooze or start new session
         if isResumingFromSnooze {
-            StatsManager.shared.resumeFromSnooze()
+            stats.resumeFromSnooze()
         } else {
-            StatsManager.shared.startSession(scheduleName: schedule.name, scheduleID: schedule.id)
+            stats.startSession(scheduleName: schedule.name, scheduleID: schedule.id)
         }
-        OverlayWindowController.shared.showOverlay()
+        overlay.showOverlay()
     }
 
     /// Compute the next valid end time for a schedule (today if not passed, otherwise tomorrow)
@@ -421,11 +444,11 @@ class ScheduleManager: ObservableObject {
 
     /// Stop a manual block immediately
     func stopManualBlock() {
-        StatsManager.shared.endSession(reason: .exited)
+        stats.endSession(reason: .exited)
 
         // Mark schedule as exited to prevent immediate re-trigger if within scheduled window
         if let schedule = activeSchedule {
-            let scheduleEndTime = computeScheduleEndTime(for: schedule, at: Date())
+            let scheduleEndTime = computeScheduleEndTime(for: schedule, at: AppClock.now())
             exitedSchedules[schedule.id] = scheduleEndTime
         }
 
@@ -437,16 +460,16 @@ class ScheduleManager: ObservableObject {
         isBlocking = false
         isManualBlock = false
 
-        OverlayWindowController.shared.hideOverlay()
+        overlay.hideOverlay()
     }
 
     /// Exit a scheduled block early (user chose to exit)
     func exitBlockEarly() {
-        StatsManager.shared.endSession(reason: .exited)
+        stats.endSession(reason: .exited)
 
         // Mark this specific schedule as exited until its natural end time (not extended by snooze)
         if let schedule = activeSchedule {
-            let scheduleEndTime = computeScheduleEndTime(for: schedule, at: Date())
+            let scheduleEndTime = computeScheduleEndTime(for: schedule, at: AppClock.now())
             exitedSchedules[schedule.id] = scheduleEndTime
         }
 
@@ -458,18 +481,17 @@ class ScheduleManager: ObservableObject {
         isBlocking = false
         isManualBlock = false
 
-        OverlayWindowController.shared.hideOverlay()
+        overlay.hideOverlay()
     }
 
     // MARK: - Notifications
 
     private func pruneStaleDeliveredNotifications() {
-        let center = UNUserNotificationCenter.current()
+        let center = notificationCenter
         let validScheduleIDs = Set(schedules.map { $0.id.uuidString })
 
-        center.getDeliveredNotifications { notifications in
-            let staleIdentifiers = notifications.compactMap { notification -> String? in
-                let identifier = notification.request.identifier
+        center.getDeliveredNotificationIdentifiers { identifiers in
+            let staleIdentifiers = identifiers.compactMap { identifier -> String? in
                 // Notification identifiers are "block-<uuid>"
                 guard identifier.hasPrefix("block-") else { return nil }
                 let uuidString = String(identifier.dropFirst("block-".count))
@@ -486,15 +508,15 @@ class ScheduleManager: ObservableObject {
         }
     }
 
-    private func scheduleUpcomingNotifications() {
-        let center = UNUserNotificationCenter.current()
+    func scheduleUpcomingNotifications() {
+        let center = notificationCenter
 
         // Remove existing notifications
         center.removeAllPendingNotificationRequests()
 
         guard notificationLeadTime > 0 else { return }
 
-        let now = Date()
+        let now = AppClock.now()
         let calendar = Calendar.current
 
         // Schedule notifications for the next 24 hours
@@ -529,11 +551,11 @@ class ScheduleManager: ObservableObject {
     /// Whether a block is currently snoozed (will resume when snoozeEndTime is reached)
     var isSnoozed: Bool {
         guard let snoozeEnd = snoozeEndTime else { return false }
-        return Date() < snoozeEnd
+        return AppClock.now() < snoozeEnd
     }
 
     var timeUntilNextBlock: String? {
-        let now = Date()
+        let now = AppClock.now()
 
         // If snoozed, show time until snooze ends (block resumes)
         if let snoozeEnd = snoozeEndTime, now < snoozeEnd {

@@ -77,7 +77,7 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
     }
 
     /// Returns the next occurrence of this schedule's start time, or nil if not applicable today
-    func nextStart(after date: Date = Date()) -> Date? {
+    func nextStart(after date: Date = AppClock.now()) -> Date? {
         guard isEnabled else { return nil }
 
         let calendar = Calendar.current
@@ -127,7 +127,7 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
 
     /// Check if the schedule is currently active
     /// Handles overnight schedules (e.g., 22:00-02:00) where end time is before start time
-    func isActive(at date: Date = Date()) -> Bool {
+    func isActive(at date: Date = AppClock.now()) -> Bool {
         guard isEnabled else { return false }
 
         let calendar = Calendar.current

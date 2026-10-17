@@ -25,7 +25,7 @@ struct BlockEvent: Codable, Identifiable {
 
     init(state: BlockState, endReason: EndReason? = nil) {
         self.id = UUID()
-        self.timestamp = Date()
+        self.timestamp = AppClock.now()
         self.state = state
         self.endReason = endReason
     }
@@ -43,8 +43,8 @@ struct BlockSession: Codable, Identifiable {
         self.id = UUID()
         self.scheduleName = scheduleName
         self.scheduleID = scheduleID
-        self.createdAt = Date()
-        self.lastUpdatedAt = Date()
+        self.createdAt = AppClock.now()
+        self.lastUpdatedAt = AppClock.now()
         self.events = [BlockEvent(state: .active)]
     }
 
@@ -81,7 +81,7 @@ struct BlockTotals {
 class StatsManager {
     static let shared = StatsManager()
 
-    private var currentSession: BlockSession?
+    private(set) var currentSession: BlockSession?
     private var stateBeforeSleep: BlockState?  // Track state before sleep for proper restoration
     private let statsDirectory: URL
 
@@ -91,9 +91,13 @@ class StatsManager {
         return formatter
     }()
 
-    private init() {
+    private convenience init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        statsDirectory = appSupport.appendingPathComponent("ScreenBlocker/Stats", isDirectory: true)
+        self.init(statsDirectory: appSupport.appendingPathComponent("ScreenBlocker/Stats", isDirectory: true))
+    }
+
+    init(statsDirectory: URL) {
+        self.statsDirectory = statsDirectory
 
         try? FileManager.default.createDirectory(at: statsDirectory, withIntermediateDirectories: true)
 
@@ -176,7 +180,7 @@ class StatsManager {
     /// Check for orphaned sessions on startup and close them.
     private func recoverIfNeeded() {
         // Load sessions from current and previous month to find any open ones
-        let now = Date()
+        let now = AppClock.now()
         let calendar = Calendar.current
 
         var sessionsToCheck: [BlockSession] = []
@@ -242,7 +246,7 @@ class StatsManager {
 
     func sessions(for period: StatsPeriod, offset: Int = 0) -> [BlockSession] {
         let calendar = Calendar.current
-        let now = Date()
+        let now = AppClock.now()
         let (startDate, endDate) = period.dateRange(from: now, offset: offset)
 
         var allSessions: [BlockSession] = []
@@ -265,7 +269,7 @@ class StatsManager {
     }
 
     func totals(for period: StatsPeriod, offset: Int = 0) -> BlockTotals {
-        let (startDate, endDate) = period.dateRange(from: Date(), offset: offset)
+        let (startDate, endDate) = period.dateRange(from: AppClock.now(), offset: offset)
         let sessions = sessions(for: period, offset: offset)
 
         var totals = BlockTotals()
@@ -295,7 +299,7 @@ class StatsManager {
                 nextTimestamp = events[i + 1].timestamp
             } else if event.state != .ended {
                 // Open session - use current time
-                nextTimestamp = Date()
+                nextTimestamp = AppClock.now()
             } else {
                 // Ended session - no duration to add for the end event
                 continue

@@ -2,7 +2,14 @@ import AppKit
 import SwiftUI
 import Combine
 
-class OverlayWindowController: ObservableObject {
+/// What ScheduleManager needs from the overlay. Abstracted so tests don't create windows.
+protocol OverlayPresenting: AnyObject {
+    func showOverlay()
+    func hideOverlay()
+    func ensureOverlayVisible()
+}
+
+class OverlayWindowController: ObservableObject, OverlayPresenting {
     static let shared = OverlayWindowController()
 
     private var overlayWindows: [NSWindow] = []

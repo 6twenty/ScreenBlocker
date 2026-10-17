@@ -15,6 +15,11 @@ let package = Package(
         .target(
             name: "ScreenBlockerKit",
             path: "Sources/ScreenBlockerKit"
+        ),
+        .testTarget(
+            name: "ScreenBlockerKitTests",
+            dependencies: ["ScreenBlockerKit"],
+            path: "Tests/ScreenBlockerKitTests"
         )
     ]
 )
