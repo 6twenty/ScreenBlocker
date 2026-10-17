@@ -26,14 +26,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Accessory apps don't show a menu bar, but key equivalents are still routed through the
-    /// main menu. Without these items, Cmd-C/V/X/A/Z don't work in text fields and Cmd-W
-    /// doesn't close the Settings window.
+    /// main menu. Without these items, Cmd-C/V/X/A/Z don't work in text fields, Cmd-W
+    /// doesn't close the Settings window, and Cmd-Q does nothing.
     private func makeMainMenu() -> NSMenu {
         let mainMenu = NSMenu()
 
         // The first item is always treated as the application menu
+        let appMenu = NSMenu()
+        let quitItem = appMenu.addItem(withTitle: "Quit ScreenBlocker", action: #selector(StatusBarController.quit), keyEquivalent: "q")
+        quitItem.target = statusBarController
         let appMenuItem = NSMenuItem()
-        appMenuItem.submenu = NSMenu()
+        appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
         let editMenu = NSMenu(title: "Edit")

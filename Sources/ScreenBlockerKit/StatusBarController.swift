@@ -158,7 +158,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    @objc private func quit() {
+    /// Quit, confirming first if a block is running or snoozed (used by the menu item and Cmd-Q)
+    @objc func quit() {
         let manager = ScheduleManager.shared
         if manager.isBlocking || manager.isSnoozed {
             let alert = NSAlert()
