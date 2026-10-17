@@ -6,7 +6,7 @@ struct StatsTab: View {
     @State private var sessions: [BlockSession] = []
     @State private var totals: BlockTotals = BlockTotals()
 
-    // Keeps figures current while a session is still running
+    // Keeps figures current while the tab is open (new sessions, running sessions, day rollover)
     private let refreshTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     // Cached formatters (DateFormatter is expensive to create)
@@ -153,9 +153,7 @@ struct StatsTab: View {
             loadStats()
         }
         .onReceive(refreshTimer) { _ in
-            if sessions.contains(where: { $0.isOpen }) {
-                loadStats()
-            }
+            loadStats()
         }
     }
 
