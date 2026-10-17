@@ -144,11 +144,20 @@ class OverlayWindowController: ObservableObject, OverlayPresenting {
     /// Make the primary overlay window key, so keystrokes go to the overlay rather than the app hidden behind it
     private func takeKeyboardFocus() {
         NSApp.activate(ignoringOtherApps: true)
+        // Disable Cmd-Tab while the overlay is up (macOS requires the Dock to be hidden for this).
+        // Force Quit stays available. These options only apply while ScreenBlocker is active.
+        NSApp.presentationOptions = [.hideDock, .disableProcessSwitching]
+        // Process switching wasn't blocked while running as a menu-bar-only (accessory) app,
+        // so act as a regular app while the overlay is up. The Dock is hidden, so no icon shows.
+        NSApp.setActivationPolicy(.regular)
         overlayWindows.first?.makeKey()
     }
 
     /// Hand focus back to the app that had it before the overlay appeared
     private func restoreKeyboardFocus() {
+        // Back to menu-bar-only before the Dock returns, so no Dock icon flashes up
+        NSApp.setActivationPolicy(.accessory)
+        NSApp.presentationOptions = []
         guard let app = previousApp else { return }
         previousApp = nil
         // Only if we still have focus (the user may have switched apps already)
