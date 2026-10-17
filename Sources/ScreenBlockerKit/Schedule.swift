@@ -51,21 +51,9 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
         case id, name, message, startHour, startMinute, endHour, endMinute, enabledDays, isEnabled
     }
 
-    /// Duration in minutes, handling overnight schedules correctly
-    var durationMinutes: Int {
-        let startMinutes = startHour * 60 + startMinute
-        let endMinutes = endHour * 60 + endMinute
-
-        if endMinutes > startMinutes {
-            // Normal same-day schedule
-            return endMinutes - startMinutes
-        } else if endMinutes < startMinutes {
-            // Overnight schedule (e.g., 22:00-02:00)
-            return (24 * 60 - startMinutes) + endMinutes
-        } else {
-            // start == end: ambiguous, default to 30 minutes
-            return 30
-        }
+    /// Start and end are identical, which is treated as a 24-hour block
+    var hasEqualStartAndEnd: Bool {
+        startHour == endHour && startMinute == endMinute
     }
 
     /// Name for display, falling back when the user left it blank

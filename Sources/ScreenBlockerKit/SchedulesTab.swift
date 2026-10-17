@@ -162,6 +162,12 @@ struct ScheduleEditorView: View {
                     Text("End:")
                     TimePicker(label: "End time", hour: $schedule.endHour, minute: $schedule.endMinute)
                 }
+
+                if schedule.hasEqualStartAndEnd {
+                    Label("Start and end are the same, so this blocks for 24 hours.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Section("Days") {
