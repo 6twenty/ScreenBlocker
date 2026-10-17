@@ -14,6 +14,7 @@ class OverlayWindowController: ObservableObject, OverlayPresenting {
 
     private var overlayWindows: [NSWindow] = []
     private var isShowingOverlay = false
+    private var previousApp: NSRunningApplication?  // Had focus before the overlay took it
     private let fadeDuration: TimeInterval = 1.0
     private let contentDelay: TimeInterval = 0.5
 
@@ -23,6 +24,7 @@ class OverlayWindowController: ObservableObject, OverlayPresenting {
     // Notifications for coordinating content fade (still used for animation timing)
     static let contentFadeInNotification = Notification.Name("OverlayContentFadeIn")
     static let contentFadeOutNotification = Notification.Name("OverlayContentFadeOut")
+    static let exitRequestedNotification = Notification.Name("OverlayExitRequested")
 
     private init() {
         // Observe screen configuration changes (monitor connect/disconnect)
@@ -51,14 +53,16 @@ class OverlayWindowController: ObservableObject, OverlayPresenting {
         overlayWindows.removeAll()
 
         isShowingOverlay = true
+        previousApp = NSApp.isActive ? nil : NSWorkspace.shared.frontmostApplication
 
         // Create an overlay window for each screen
-        for screen in NSScreen.screens {
-            let window = createOverlayWindow(for: screen)
+        for (index, screen) in NSScreen.screens.enumerated() {
+            let window = createOverlayWindow(for: screen, isPrimary: index == 0)
             window.alphaValue = 0  // Start transparent
             overlayWindows.append(window)
             window.orderFrontRegardless()
         }
+        takeKeyboardFocus()
 
         // Fade in background
         NSAnimationContext.runAnimationGroup { context in
@@ -84,6 +88,7 @@ class OverlayWindowController: ObservableObject, OverlayPresenting {
         shouldShowContent = false
         let windowsToHide = overlayWindows
         overlayWindows.removeAll()
+        restoreKeyboardFocus()
 
         // First, fade out content
         NotificationCenter.default.post(name: Self.contentFadeOutNotification, object: nil)
@@ -121,20 +126,40 @@ class OverlayWindowController: ObservableObject, OverlayPresenting {
         }
         overlayWindows.removeAll()
 
-        for screen in NSScreen.screens {
-            let window = createOverlayWindow(for: screen)
+        if !NSApp.isActive {
+            previousApp = NSWorkspace.shared.frontmostApplication
+        }
+        for (index, screen) in NSScreen.screens.enumerated() {
+            let window = createOverlayWindow(for: screen, isPrimary: index == 0)
             window.alphaValue = 1  // Already visible, no fade needed
             overlayWindows.append(window)
             window.orderFrontRegardless()
         }
+        takeKeyboardFocus()
         // Content should already be visible for refresh - set state before posting notification
         shouldShowContent = true
         NotificationCenter.default.post(name: Self.contentFadeInNotification, object: nil)
     }
 
-    private func createOverlayWindow(for screen: NSScreen) -> NSWindow {
+    /// Make the primary overlay window key, so keystrokes go to the overlay rather than the app hidden behind it
+    private func takeKeyboardFocus() {
+        NSApp.activate(ignoringOtherApps: true)
+        overlayWindows.first?.makeKey()
+    }
+
+    /// Hand focus back to the app that had it before the overlay appeared
+    private func restoreKeyboardFocus() {
+        guard let app = previousApp else { return }
+        previousApp = nil
+        // Only if we still have focus (the user may have switched apps already)
+        if NSApp.isActive && !app.isTerminated {
+            app.activate(options: [])
+        }
+    }
+
+    private func createOverlayWindow(for screen: NSScreen, isPrimary: Bool) -> NSWindow {
         // Use full screen frame - menu bar remains visible since it's at a higher window level
-        let window = NSWindow(
+        let window = OverlayWindow(
             contentRect: screen.frame,
             styleMask: [.borderless],
             backing: .buffered,
@@ -149,14 +174,35 @@ class OverlayWindowController: ObservableObject, OverlayPresenting {
         window.acceptsMouseMovedEvents = true
 
         // Set the SwiftUI overlay view
-        let overlayView = OverlayView()
+        let overlayView = OverlayView(isPrimary: isPrimary)
         window.contentView = NSHostingView(rootView: overlayView)
 
         return window
     }
 }
 
+/// Borderless windows can't become key by default; the overlay needs to so it receives keystrokes.
+private final class OverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 53: // Esc asks to exit
+            NotificationCenter.default.post(name: OverlayWindowController.exitRequestedNotification, object: nil)
+        case 48: // Tab keeps keyboard navigation between the overlay's buttons working
+            super.keyDown(with: event)
+        default:
+            // Swallow other keys silently (no beep, and nothing reaches hidden apps)
+            break
+        }
+    }
+}
+
 struct OverlayView: View {
+    /// The overlay on the main display, which handles keyboard requests (so only one dialog appears)
+    let isPrimary: Bool
+
     @ObservedObject private var manager = ScheduleManager.shared
     @ObservedObject private var overlayController = OverlayWindowController.shared
     @State private var currentTime = Date()
@@ -174,6 +220,7 @@ struct OverlayView: View {
     // Content fade notifications
     private let fadeInPublisher = NotificationCenter.default.publisher(for: OverlayWindowController.contentFadeInNotification)
     private let fadeOutPublisher = NotificationCenter.default.publisher(for: OverlayWindowController.contentFadeOutNotification)
+    private let exitRequestedPublisher = NotificationCenter.default.publisher(for: OverlayWindowController.exitRequestedNotification)
 
     var body: some View {
         ZStack {
@@ -260,6 +307,11 @@ struct OverlayView: View {
         }
         .onReceive(fadeInPublisher) { _ in
             fadeInContent()
+        }
+        .onReceive(exitRequestedPublisher) { _ in
+            if isPrimary && contentOpacity > 0 {
+                showExitConfirmation = true
+            }
         }
         .onReceive(fadeOutPublisher) { _ in
             // Keep cached values during fade out
