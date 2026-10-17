@@ -261,11 +261,12 @@ class ScheduleManager: ObservableObject {
                 continue
             }
             shouldBlock = true
-            currentActiveSchedule = schedule
 
+            // Overlapping schedules form one block, named after the schedule that ends last
             let endTime = computeScheduleEndTime(for: schedule, at: now)
             if blockEnd == nil || endTime > blockEnd! {
                 blockEnd = endTime
+                currentActiveSchedule = schedule
             }
         }
 
@@ -471,10 +472,15 @@ class ScheduleManager: ObservableObject {
     func exitBlockEarly() {
         stats.endSession(reason: .exited)
 
-        // Mark this specific schedule as exited until its natural end time (not extended by snooze)
-        if let schedule = activeSchedule {
-            let scheduleEndTime = computeScheduleEndTime(for: schedule, at: AppClock.now())
-            exitedSchedules[schedule.id] = scheduleEndTime
+        // Mark every schedule in the block as exited until its natural end time (not extended by snooze),
+        // so an overlapping schedule doesn't immediately re-block
+        let now = AppClock.now()
+        var exiting = schedules.filter { $0.isActive(at: now) }
+        if let schedule = activeSchedule, !exiting.contains(where: { $0.id == schedule.id }) {
+            exiting.append(schedule)
+        }
+        for schedule in exiting {
+            exitedSchedules[schedule.id] = computeScheduleEndTime(for: schedule, at: now)
         }
 
         manualBlockSchedule = nil
