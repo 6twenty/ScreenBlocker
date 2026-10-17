@@ -196,6 +196,21 @@ class ScheduleManager: ObservableObject {
             currentBlockStartTime = nil
         }
 
+        // A resumed block whose schedule was deleted or disabled (only possible while snoozed) is cancelled
+        if let manualSchedule = manualBlockSchedule, !isScheduleAvailable(manualSchedule) {
+            stats.endSession(reason: .cancelled)
+            manualBlockSchedule = nil
+            isManualBlock = false
+            currentBlockStartTime = nil
+            currentBlockEndTime = nil
+            activeSchedule = nil
+            snoozedScheduleID = nil
+            if isBlocking {
+                isBlocking = false
+                overlay.hideOverlay()
+            }
+        }
+
         // Check for manual block first
         if let manualSchedule = manualBlockSchedule, let endTime = currentBlockEndTime {
             if now < endTime {
@@ -421,7 +436,13 @@ class ScheduleManager: ObservableObject {
     /// Whether a schedule can be resumed: it's within its scheduled time (e.g. after exiting early),
     /// or it's the block that's currently snoozed
     func canResume(_ schedule: Schedule) -> Bool {
-        schedule.isActive(at: AppClock.now()) || (isSnoozed && activeSchedule?.id == schedule.id)
+        guard isScheduleAvailable(schedule) else { return false }
+        return schedule.isActive(at: AppClock.now()) || (isSnoozed && activeSchedule?.id == schedule.id)
+    }
+
+    /// The schedule still exists and is enabled
+    private func isScheduleAvailable(_ schedule: Schedule) -> Bool {
+        schedules.contains { $0.id == schedule.id && $0.isEnabled }
     }
 
     /// Resume an interrupted schedule now, running until the end of its current occurrence

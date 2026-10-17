@@ -22,4 +22,35 @@ struct ReviewFollowUpTests {
         #expect(contents.contains(first))
         #expect(contents.contains(second))
     }
+
+    @Test func deletingSnoozedResumedBlockCancelsIt() {
+        let schedule = makeSchedule((9, 0), (10, 0))
+        let h = Harness(schedules: [schedule])
+        h.tick(at: date(2026, 10, 19, 9, 0))
+        setClock(date(2026, 10, 19, 9, 5))
+        h.manager.exitBlockEarly()
+        setClock(date(2026, 10, 19, 9, 10))
+        h.manager.startManualBlock(from: schedule)
+        setClock(date(2026, 10, 19, 9, 11))
+        h.manager.snooze(minutes: 5)
+        h.manager.deleteSchedule(schedule)
+
+        h.tick(at: date(2026, 10, 19, 9, 17))
+        #expect(!h.manager.isBlocking)
+        #expect(!h.overlay.isShown)
+        #expect(h.stats.currentSession == nil)
+        #expect(h.savedSessions().last?.endReason == .cancelled)
+    }
+
+    @Test func cannotResumeSnoozedScheduleAfterDisablingIt() {
+        var schedule = makeSchedule((9, 0), (10, 0))
+        let h = Harness(schedules: [schedule])
+        h.tick(at: date(2026, 10, 19, 9, 0))
+        setClock(date(2026, 10, 19, 9, 1))
+        h.manager.snooze(minutes: 5)
+
+        schedule.isEnabled = false
+        h.manager.updateSchedule(schedule)
+        #expect(!h.manager.canResume(schedule))
+    }
 }
