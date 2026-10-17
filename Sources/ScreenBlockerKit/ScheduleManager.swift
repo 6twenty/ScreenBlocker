@@ -31,6 +31,7 @@ class ScheduleManager: ObservableObject {
     private var snoozedScheduleID: UUID?  // Track which schedule was snoozed for reliable resume
 
     private let schedulesKey = "ScreenBlocker.schedules"
+    private let unreadableSchedulesBackupKey = "ScreenBlocker.schedules.unreadableBackup"
     private let notificationLeadTimeKey = "ScreenBlocker.notificationLeadTime"
 
     private let defaults: UserDefaults
@@ -66,7 +67,8 @@ class ScheduleManager: ObservableObject {
             schedules = try JSONDecoder().decode([Schedule].self, from: data)
         } catch {
             print("Failed to decode schedules (data may be corrupted): \(error)")
-            // Keep schedules empty rather than silently replacing with defaults
+            // Keep the unreadable data under a separate key, since the next save overwrites the original
+            defaults.set(data, forKey: unreadableSchedulesBackupKey)
             schedules = []
         }
     }
@@ -93,11 +95,13 @@ class ScheduleManager: ObservableObject {
     // MARK: - Monitoring
 
     func startMonitoring() {
-        // Check every second for accuracy
-        checkTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        // Check every second for accuracy. Common modes keep it firing while a menu is open.
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.checkSchedules()
         }
-        checkTimer?.tolerance = 0.1
+        timer.tolerance = 0.1
+        RunLoop.main.add(timer, forMode: .common)
+        checkTimer = timer
 
         let workspace = NSWorkspace.shared.notificationCenter
 
@@ -159,6 +163,14 @@ class ScheduleManager: ObservableObject {
     func checkSchedules(isWakingFromSleep: Bool = false) {
         let now = AppClock.now()
 
+        // When a block's start passes, its next occurrence needs a fresh notification
+        let previousNextBlockStartTime = nextBlockStartTime
+        defer {
+            if nextBlockStartTime != previousNextBlockStartTime {
+                scheduleUpcomingNotifications()
+            }
+        }
+
         // Track if we're resuming from snooze this tick
         var resumingFromSnooze = false
 
@@ -196,6 +208,9 @@ class ScheduleManager: ObservableObject {
                     }
                     overlay.showOverlay()
                 }
+                if isWakingFromSleep {
+                    stats.resumeFromSleep(to: .active)
+                }
                 updateNextBlockTime()
                 return
             } else {
@@ -230,8 +245,8 @@ class ScheduleManager: ObservableObject {
                 shouldBlock = true
                 blockEnd = endTime
                 currentActiveSchedule = schedule
-            } else if currentBlockEndTime == nil || now >= currentBlockEndTime! {
-                // Snooze period is over or schedule no longer valid - end the session
+            } else {
+                // Extended end has passed, or the schedule was deleted/disabled while snoozed
                 if resumingFromSnooze {
                     stats.endSession(reason: .cancelled)
                 }
@@ -276,11 +291,14 @@ class ScheduleManager: ObservableObject {
             if shouldBlock {
                 isManualBlock = false  // This is a scheduled block, not manual
                 currentBlockStartTime = now
+                // Each call only applies in its matching state, so at most one takes effect
                 if isWakingFromSleep {
                     stats.resumeFromSleep(to: .active)
-                } else if resumingFromSnooze {
+                }
+                if resumingFromSnooze {
                     stats.resumeFromSnooze()
-                } else {
+                }
+                if !stats.hasActiveSession {
                     stats.startSession(scheduleName: currentActiveSchedule?.name ?? "Unknown", scheduleID: currentActiveSchedule?.id)
                 }
                 overlay.showOverlay()
@@ -296,6 +314,10 @@ class ScheduleManager: ObservableObject {
         } else if shouldBlock {
             currentBlockEndTime = blockEnd
             activeSchedule = currentActiveSchedule
+            // Waking mid-block: the session is still marked as sleeping
+            if isWakingFromSleep {
+                stats.resumeFromSleep(to: .active)
+            }
         }
 
         // If waking from sleep with an open session but nothing is blocking, end the session
@@ -419,6 +441,9 @@ class ScheduleManager: ObservableObject {
         if isResumingFromSnooze {
             stats.resumeFromSnooze()
         } else {
+            // Replacing a different (snoozed) block: close its session rather than reusing it
+            stats.endSession(reason: .cancelled)
+            snoozedScheduleID = nil
             stats.startSession(scheduleName: schedule.name, scheduleID: schedule.id)
         }
         overlay.showOverlay()
@@ -484,6 +509,11 @@ class ScheduleManager: ObservableObject {
         overlay.hideOverlay()
     }
 
+    /// Close any open stats session when the app quits (including logout/shutdown)
+    func handleAppTermination() {
+        stats.endSession(reason: .cancelled)
+    }
+
     // MARK: - Notifications
 
     private func pruneStaleDeliveredNotifications() {
@@ -519,14 +549,12 @@ class ScheduleManager: ObservableObject {
         let now = AppClock.now()
         let calendar = Calendar.current
 
-        // Schedule notifications for the next 24 hours
+        // Queue each schedule's next occurrence (re-run whenever the next block moves on)
         for schedule in schedules where schedule.isEnabled {
             guard let nextStart = schedule.nextStart(after: now) else { continue }
 
-            // Only schedule if within next 24 hours
             let notifyTime = nextStart.addingTimeInterval(TimeInterval(-notificationLeadTime * 60))
-            guard notifyTime > now,
-                  nextStart.timeIntervalSince(now) < 86400 else { continue }
+            guard notifyTime > now else { continue }
 
             let content = UNMutableNotificationContent()
             content.title = "Screen Block Starting Soon"

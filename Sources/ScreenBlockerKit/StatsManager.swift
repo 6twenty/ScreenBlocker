@@ -23,9 +23,9 @@ struct BlockEvent: Codable, Identifiable {
     var state: BlockState
     var endReason: EndReason?  // Only meaningful when state == .ended
 
-    init(state: BlockState, endReason: EndReason? = nil) {
+    init(state: BlockState, endReason: EndReason? = nil, timestamp: Date = AppClock.now()) {
         self.id = UUID()
-        self.timestamp = AppClock.now()
+        self.timestamp = timestamp
         self.state = state
         self.endReason = endReason
     }
@@ -179,21 +179,17 @@ class StatsManager {
 
     /// Check for orphaned sessions on startup and close them.
     private func recoverIfNeeded() {
-        // Load sessions from current and previous month to find any open ones
-        let now = AppClock.now()
-        let calendar = Calendar.current
+        let files = (try? FileManager.default.contentsOfDirectory(at: statsDirectory, includingPropertiesForKeys: nil)) ?? []
 
-        var sessionsToCheck: [BlockSession] = []
-        sessionsToCheck.append(contentsOf: loadSessions(from: fileURL(for: now)))
+        for url in files where url.pathExtension == "json" {
+            guard case .loaded(let sessions) = readSessions(from: url) else { continue }
 
-        if let lastMonth = calendar.date(byAdding: .month, value: -1, to: now) {
-            sessionsToCheck.append(contentsOf: loadSessions(from: fileURL(for: lastMonth)))
-        }
-
-        // Find any open sessions and close them with error
-        for var session in sessionsToCheck where session.isOpen {
-            session.appendEvent(BlockEvent(state: .ended, endReason: .error))
-            saveSession(session)
+            // The app quit unexpectedly, so the real end time is unknown. Close at the last
+            // recorded event rather than now, so time the app wasn't running isn't counted.
+            for var session in sessions where session.isOpen {
+                session.appendEvent(BlockEvent(state: .ended, endReason: .error, timestamp: session.lastUpdatedAt))
+                saveSession(session)
+            }
         }
     }
 
@@ -211,7 +207,18 @@ class StatsManager {
 
     private func saveSession(_ session: BlockSession) {
         let url = fileURL(for: session.createdAt)
-        var sessions = loadSessions(from: url)
+        var sessions: [BlockSession]
+
+        switch readSessions(from: url) {
+        case .missing:
+            sessions = []
+        case .loaded(let existing):
+            sessions = existing
+        case .unreadable:
+            // Move the unreadable file aside so writing this session doesn't destroy its history
+            preserveUnreadableFile(at: url)
+            sessions = []
+        }
 
         // Update existing or append new
         if let index = sessions.firstIndex(where: { $0.id == session.id }) {
@@ -228,17 +235,42 @@ class StatsManager {
         }
     }
 
-    private func loadSessions(from url: URL) -> [BlockSession] {
+    private enum ReadResult {
+        case missing
+        case loaded([BlockSession])
+        case unreadable
+    }
+
+    private func readSessions(from url: URL) -> ReadResult {
         guard FileManager.default.fileExists(atPath: url.path) else {
-            return []
+            return .missing
         }
 
         do {
             let data = try Data(contentsOf: url)
-            return try JSONDecoder().decode([BlockSession].self, from: data)
+            return .loaded(try JSONDecoder().decode([BlockSession].self, from: data))
         } catch {
             print("Failed to load sessions from \(url.lastPathComponent): \(error)")
-            return []
+            return .unreadable
+        }
+    }
+
+    private func loadSessions(from url: URL) -> [BlockSession] {
+        if case .loaded(let sessions) = readSessions(from: url) {
+            return sessions
+        }
+        return []
+    }
+
+    /// Renames an unreadable stats file (e.g. "2026-10.json" → "2026-10.unreadable-1792272069.json.bak").
+    private func preserveUnreadableFile(at url: URL) {
+        let stamp = Int(AppClock.now().timeIntervalSince1970)
+        let backupName = url.deletingPathExtension().lastPathComponent + ".unreadable-\(stamp).json.bak"
+        let backupURL = url.deletingLastPathComponent().appendingPathComponent(backupName)
+        do {
+            try FileManager.default.moveItem(at: url, to: backupURL)
+        } catch {
+            print("Failed to preserve unreadable stats file \(url.lastPathComponent): \(error)")
         }
     }
 
@@ -261,16 +293,20 @@ class StatsManager {
             checkDate = calendar.date(from: calendar.dateComponents([.year, .month], from: nextMonth)) ?? nextMonth
         }
 
-        // Filter to sessions that overlap with the period
+        // Filter to sessions that overlap with the period (open sessions run until now)
         return allSessions.filter { session in
-            let sessionEnd = session.events.last?.timestamp ?? session.createdAt
+            let sessionEnd = session.isOpen ? now : (session.events.last?.timestamp ?? session.createdAt)
             return sessionEnd > startDate && session.createdAt < endDate
         }
     }
 
     func totals(for period: StatsPeriod, offset: Int = 0) -> BlockTotals {
+        totals(for: sessions(for: period, offset: offset), period: period, offset: offset)
+    }
+
+    /// Combined totals for already-loaded sessions, counting only time inside the period.
+    func totals(for sessions: [BlockSession], period: StatsPeriod, offset: Int = 0) -> BlockTotals {
         let (startDate, endDate) = period.dateRange(from: AppClock.now(), offset: offset)
-        let sessions = sessions(for: period, offset: offset)
 
         var totals = BlockTotals()
 
@@ -282,6 +318,12 @@ class StatsManager {
         }
 
         return totals
+    }
+
+    /// Totals for one session, counting only the part that falls inside the period.
+    func totals(for session: BlockSession, period: StatsPeriod, offset: Int = 0) -> BlockTotals {
+        let (startDate, endDate) = period.dateRange(from: AppClock.now(), offset: offset)
+        return calculateTotals(for: session, clampedTo: startDate...endDate)
     }
 
     /// Calculate totals for a single session, optionally clamped to a date range.

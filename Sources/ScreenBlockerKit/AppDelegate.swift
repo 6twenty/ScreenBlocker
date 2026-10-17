@@ -24,6 +24,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        // Close any open stats session so the time the app is gone isn't counted
+        scheduleManager.handleAppTermination()
+
         // Clear pending notifications - they're only useful if the app is running
         // (a "block starting soon" notification is misleading if no block will actually start)
         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()

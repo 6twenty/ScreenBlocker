@@ -6,6 +6,9 @@ struct StatsTab: View {
     @State private var sessions: [BlockSession] = []
     @State private var totals: BlockTotals = BlockTotals()
 
+    // Keeps figures current while a session is still running
+    private let refreshTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+
     // Cached formatters (DateFormatter is expensive to create)
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -133,13 +136,7 @@ struct StatsTab: View {
                             if let reason = session.endReason {
                                 reasonBadge(for: reason)
                             } else {
-                                Text("Active")
-                                    .font(.caption)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.blue.opacity(0.2))
-                                    .foregroundColor(.blue)
-                                    .cornerRadius(4)
+                                stateBadge(for: session.currentState)
                             }
                         }
                     }
@@ -150,6 +147,11 @@ struct StatsTab: View {
         .padding()
         .onAppear {
             loadStats()
+        }
+        .onReceive(refreshTimer) { _ in
+            if sessions.contains(where: { $0.isOpen }) {
+                loadStats()
+            }
         }
     }
 
@@ -165,7 +167,7 @@ struct StatsTab: View {
     private func loadStats() {
         sessions = StatsManager.shared.sessions(for: selectedPeriod, offset: offset)
             .sorted { $0.createdAt > $1.createdAt }
-        totals = StatsManager.shared.totals(for: selectedPeriod, offset: offset)
+        totals = StatsManager.shared.totals(for: sessions, period: selectedPeriod, offset: offset)
     }
 
     private func formatDuration(_ interval: TimeInterval) -> String {
@@ -181,8 +183,12 @@ struct StatsTab: View {
 
     private func formatSessionTime(_ session: BlockSession) -> String {
         let startStr = Self.timeFormatter.string(from: session.createdAt)
-        let endTime = session.events.last?.timestamp ?? session.createdAt
-        let endStr = Self.timeFormatter.string(from: endTime)
+        let endStr: String
+        if session.isOpen {
+            endStr = "now"
+        } else {
+            endStr = Self.timeFormatter.string(from: session.events.last?.timestamp ?? session.createdAt)
+        }
 
         if selectedPeriod != .day {
             let dateStr = Self.dateFormatter.string(from: session.createdAt)
@@ -192,26 +198,10 @@ struct StatsTab: View {
         return "\(startStr) – \(endStr)"
     }
 
-    /// Calculate only the active (blocking) time for a session
+    /// Active (blocking) time for a session, counting only the part inside the selected period
+    /// so rows add up to the headline total
     private func sessionActiveTime(_ session: BlockSession) -> TimeInterval {
-        var activeTime: TimeInterval = 0
-        let events = session.events
-
-        for i in 0..<events.count {
-            let event = events[i]
-            guard event.state == .active else { continue }
-
-            let nextTimestamp: Date
-            if i + 1 < events.count {
-                nextTimestamp = events[i + 1].timestamp
-            } else {
-                nextTimestamp = Date()
-            }
-
-            activeTime += nextTimestamp.timeIntervalSince(event.timestamp)
-        }
-
-        return activeTime
+        StatsManager.shared.totals(for: session, period: selectedPeriod, offset: offset).active
     }
 
     @ViewBuilder
@@ -227,6 +217,23 @@ struct StatsTab: View {
             ("Error", .gray)
         }
 
+        badge(text, color: color)
+    }
+
+    /// Badge for a session that hasn't ended yet
+    @ViewBuilder
+    private func stateBadge(for state: BlockState) -> some View {
+        switch state {
+        case .snoozed:
+            badge("Snoozed", color: .orange)
+        case .sleeping:
+            badge("Sleeping", color: .blue)
+        case .active, .ended:
+            badge("Active", color: .blue)
+        }
+    }
+
+    private func badge(_ text: String, color: Color) -> some View {
         Text(text)
             .font(.caption)
             .padding(.horizontal, 6)

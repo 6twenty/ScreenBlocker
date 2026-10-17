@@ -89,10 +89,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private func startUpdating() {
-        // Update the menu bar title every 30 seconds
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+        // Update the menu bar title every 30 seconds (common modes keep it firing while the menu is open)
+        let timer = Timer(timeInterval: 30.0, repeats: true) { [weak self] _ in
             self?.updateButtonTitle()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        updateTimer = timer
     }
 
     private func updateButtonTitle() {
