@@ -16,8 +16,6 @@ class ScheduleManager: ObservableObject {
 
     @Published var schedules: [Schedule] = []
     @Published var isBlocking: Bool = false
-    @Published var isManualBlock: Bool = false
-    @Published var currentBlockStartTime: Date?
     @Published var currentBlockEndTime: Date?
     @Published var nextBlockStartTime: Date?
     @Published var nextSchedule: Schedule?
@@ -178,134 +176,149 @@ class ScheduleManager: ObservableObject {
         // When a block's start passes, its next occurrence needs a fresh notification
         let previousNextBlockStartTime = nextBlockStartTime
         defer {
+            updateNextBlockTime()
             if nextBlockStartTime != previousNextBlockStartTime {
                 scheduleUpcomingNotifications()
             }
         }
 
-        // Snapshot the previous block's (possibly snooze-extended) end before anything below clears it.
-        // It decides whether a newly active schedule continues that block, and where its session ends.
-        let previousBlockEnd = currentBlockEndTime
         // A session that's over is closed at its block's end, even if that passed while asleep
-        let sessionEnd = min(now, previousBlockEnd ?? now)
+        let sessionEnd = min(now, currentBlockEndTime ?? now)
 
-        // Track if we're resuming from snooze this tick
-        var resumingFromSnooze = false
-        // The snoozed block ran past its extended end; its session closes below unless an overlap continues it
-        var snoozedBlockExpired = false
+        let snoozeExpired = snoozeEndTime.map { now >= $0 } ?? false
+        if snoozeExpired {
+            snoozeEndTime = nil
+        }
+        // Schedules exited early stay suppressed until their natural end
+        exitedSchedules = exitedSchedules.filter { $0.value > now }
 
-        // Check if we're in snooze mode
-        if let snoozeEnd = snoozeEndTime, now < snoozeEnd {
-            // Still in snooze, don't block
-            if isBlocking {
-                isBlocking = false
-                overlay.hideOverlay()
-            }
-            // If waking from sleep while snoozed, resume to snoozed state
+        switch decideBlock(at: now, snoozeExpired: snoozeExpired) {
+        case .snoozed:
             if isWakingFromSleep {
                 stats.resumeFromSleep(to: .snoozed)
             }
-            updateNextBlockTime()
-            return
-        } else if snoozeEndTime != nil {
-            // Snooze expired - clear snooze state
-            snoozeEndTime = nil
-            resumingFromSnooze = true
-            // Clear block start time so fresh blocks get a new start time
-            // (if the block resumes, it will be set below; if not, we need it cleared)
-            currentBlockStartTime = nil
-        }
-
-        // A resumed block whose schedule was deleted or disabled (only possible while snoozed) is cancelled
-        if let manualSchedule = manualBlockSchedule, !isScheduleAvailable(manualSchedule) {
-            stats.endSession(reason: .cancelled, at: sessionEnd)
-            manualBlockSchedule = nil
-            isManualBlock = false
-            currentBlockStartTime = nil
-            currentBlockEndTime = nil
-            activeSchedule = nil
-            snoozedScheduleID = nil
             if isBlocking {
                 isBlocking = false
                 overlay.hideOverlay()
             }
-        }
 
-        // Check for manual block first
-        if let manualSchedule = manualBlockSchedule, let endTime = currentBlockEndTime {
-            if now < endTime {
-                // Manual block still active
-                if !isBlocking {
-                    isBlocking = true
-                    activeSchedule = manualSchedule
-                    if resumingFromSnooze {
-                        stats.resumeFromSnooze()
-                    }
-                    overlay.showOverlay()
-                }
-                if isWakingFromSleep {
-                    stats.resumeFromSleep(to: .active)
-                }
-                updateNextBlockTime()
-                return
-            } else {
-                // Manual block ended naturally (timed out)
-                stats.endSession(reason: .completed, at: sessionEnd)
-                manualBlockSchedule = nil
-                isManualBlock = false
-                isBlocking = false
-                currentBlockStartTime = nil
-                currentBlockEndTime = nil
-                activeSchedule = nil
-                snoozedScheduleID = nil
+        case .idle(let reason):
+            // Whatever session is still open is over
+            stats.endSession(reason: reason, at: sessionEnd)
+            if isBlocking {
                 overlay.hideOverlay()
             }
+            clearBlock()
+
+        case .blocking(let block, let closingPrevious):
+            if let reason = closingPrevious {
+                stats.endSession(reason: reason, at: sessionEnd)
+            }
+            // Only a wake leaves the sleeping state, since a tick can still run after the sleep notice
+            if isWakingFromSleep {
+                stats.resumeFromSleep(to: .active)
+            }
+            stats.resumeFromSnooze()  // No-op unless the session is snoozed
+            if stats.hasActiveSession {
+                // A later-ending overlap may have taken over the block, and now names it
+                stats.updateCurrentSession(scheduleName: block.owner.displayName, scheduleID: block.owner.id)
+            } else {
+                stats.startSession(scheduleName: block.owner.displayName, scheduleID: block.owner.id)
+            }
+
+            manualBlockSchedule = block.isManual ? block.owner : nil
+            snoozedScheduleID = block.snoozedScheduleID
+            currentBlockEndTime = block.end
+            activeSchedule = block.owner
+            activeScheduleNaturalEnd = block.ownerEnd
+            if !isBlocking {
+                isBlocking = true
+                overlay.showOverlay()
+            }
+        }
+    }
+
+    /// What the block should be doing this tick
+    private enum BlockDecision {
+        /// Paused by a snooze that hasn't run out
+        case snoozed
+        /// Nothing to block. Any open session is over, for this reason.
+        case idle(EndReason)
+        /// Block, or keep blocking. `closingPrevious` is set when the open session is over
+        /// rather than continuing into this block.
+        case blocking(Block, closingPrevious: EndReason?)
+    }
+
+    private struct Block {
+        let owner: Schedule           // Names the block
+        let end: Date                 // Combined end, including any snooze extension
+        let ownerEnd: Date?           // The owner's own (unsnoozed) end
+        let isManual: Bool
+        let snoozedScheduleID: UUID?  // The resumed snoozed schedule, while the block still runs on its extension
+    }
+
+    /// Works out what the block should be doing now from the schedules and the previous tick's state,
+    /// without changing anything
+    private func decideBlock(at now: Date, snoozeExpired: Bool) -> BlockDecision {
+        if snoozeEndTime != nil {
+            return .snoozed
         }
 
-        // Clean up expired exited schedules
-        exitedSchedules = exitedSchedules.filter { $0.value > now }
+        // The previous block's (possibly snooze-extended) end decides whether an active schedule continues it
+        let previousBlockEnd = currentBlockEndTime
+        // That end, and the snoozed schedule, carry over until the block they belong to is over
+        var carriedEnd = currentBlockEndTime
+        var snoozedID = snoozedScheduleID
+        // The open session is over for this reason, even if something else is blocking now
+        var forcedEnd: EndReason?
+        // The reason to close the open session with, if nothing continues it
+        var endReason = EndReason.completed
 
-        // Check if any schedule is currently active
-        var shouldBlock = false
-        var blockEnd: Date?                  // Combined end, including any snooze extension
-        var currentActiveSchedule: Schedule?
-        var ownerEnd: Date?                  // Natural end of the schedule that names the block
+        if let manual = manualBlockSchedule {
+            if !isScheduleAvailable(manual.id) {
+                // A resumed block whose schedule was deleted or disabled (only possible while snoozed)
+                forcedEnd = .cancelled
+            } else if let end = currentBlockEndTime, now < end {
+                let block = Block(owner: manual, end: end, ownerEnd: activeScheduleNaturalEnd, isManual: true, snoozedScheduleID: nil)
+                return .blocking(block, closingPrevious: nil)
+            } else {
+                forcedEnd = .completed
+            }
+            carriedEnd = nil
+            snoozedID = nil
+        }
+
+        var owner: Schedule?
+        var ownerEnd: Date?     // Natural end of the schedule that names the block
+        var blockEnd: Date?     // Combined end, including any snooze extension
         // Whether this continues the previous block, rather than being a separate one that took over
         var continuesPreviousBlock = previousBlockEnd == nil
 
-        // Check for resumed postponed block (snooze expired but extended end time not yet reached)
-        if let scheduleID = snoozedScheduleID {
-            if let endTime = currentBlockEndTime,
-               now < endTime,
-               let schedule = schedules.first(where: { $0.id == scheduleID && $0.isEnabled }),
-               exitedSchedules[scheduleID] == nil || exitedSchedules[scheduleID]! <= now {
-                // Resume the postponed block
-                shouldBlock = true
-                blockEnd = endTime
-                currentActiveSchedule = schedule
+        // A resumed snooze runs on until its extended end, even past its schedule's own end
+        if let id = snoozedID {
+            if let end = carriedEnd, now < end,
+               let schedule = schedules.first(where: { $0.id == id && $0.isEnabled }),
+               exitedSchedules[id] == nil {
+                owner = schedule
                 ownerEnd = snoozedScheduleNaturalEnd ?? computeScheduleEndTime(for: schedule, at: now)
+                blockEnd = end
                 continuesPreviousBlock = true
             } else {
-                // Extended end has passed, or the schedule was deleted/disabled while snoozed
-                if resumingFromSnooze {
-                    if schedules.contains(where: { $0.id == scheduleID && $0.isEnabled }) {
-                        snoozedBlockExpired = true
+                if snoozeExpired {
+                    if isScheduleAvailable(id) {
+                        // Ran past its extended end while snoozed: cancelled, unless an overlap continues it
+                        endReason = .cancelled
                     } else {
-                        stats.endSession(reason: .cancelled, at: sessionEnd)
+                        // Deleted or disabled while snoozed
+                        forcedEnd = .cancelled
                     }
                 }
-                snoozedScheduleID = nil
-                currentBlockEndTime = nil
+                carriedEnd = nil
+                snoozedID = nil
             }
         }
 
-        for schedule in schedules where schedule.isActive(at: now) {
-            // Skip schedules that were manually exited (until their natural end time)
-            if let exitedUntil = exitedSchedules[schedule.id], now < exitedUntil {
-                continue
-            }
-            shouldBlock = true
-
+        for schedule in schedules where schedule.isActive(at: now) && exitedSchedules[schedule.id] == nil {
             // Started before the previous block ended, so it overlaps and continues that block
             if let previousBlockEnd, computeScheduleStartTime(for: schedule, at: now) < previousBlockEnd {
                 continuesPreviousBlock = true
@@ -319,94 +332,33 @@ class ScheduleManager: ObservableObject {
             }
             if ownerEnd == nil || endTime > ownerEnd! {
                 ownerEnd = endTime
-                currentActiveSchedule = schedule
+                owner = schedule
             }
         }
 
-        // Apply any snooze extension to end time
-        if let currentEnd = currentBlockEndTime, shouldBlock {
-            // Keep the extended end time if it's later
-            if currentEnd > (blockEnd ?? Date.distantPast) {
-                blockEnd = currentEnd
-            }
+        // Keep any snooze extension
+        if let carriedEnd, let end = blockEnd, carriedEnd > end {
+            blockEnd = carriedEnd
         }
 
-        // Check if we've passed the (possibly extended) end time
-        if shouldBlock, let end = blockEnd, now >= end {
-            shouldBlock = false
-            currentActiveSchedule = nil
+        guard let owner, let blockEnd, now < blockEnd else {
+            return .idle(forcedEnd ?? endReason)
         }
 
-        if shouldBlock != isBlocking {
-            isBlocking = shouldBlock
-            currentBlockEndTime = blockEnd
-            activeSchedule = currentActiveSchedule
-            activeScheduleNaturalEnd = shouldBlock ? ownerEnd : nil
+        // When the previous block is over and a separate one has taken over (back-to-back blocks,
+        // or one that started while asleep), the old session closes and a new one starts
+        let closingPrevious = forcedEnd ?? (continuesPreviousBlock ? nil : endReason)
+        let block = Block(owner: owner, end: blockEnd, ownerEnd: ownerEnd, isManual: false, snoozedScheduleID: snoozedID)
+        return .blocking(block, closingPrevious: closingPrevious)
+    }
 
-            if shouldBlock {
-                isManualBlock = false  // This is a scheduled block, not manual
-                currentBlockStartTime = now
-                // The snoozed block ran out and nothing overlapping carries it on: close it, start afresh
-                if snoozedBlockExpired && !continuesPreviousBlock {
-                    stats.endSession(reason: .cancelled, at: sessionEnd)
-                }
-                // Each call only applies in its matching state, so at most one takes effect
-                if isWakingFromSleep {
-                    stats.resumeFromSleep(to: .active)
-                }
-                if resumingFromSnooze {
-                    stats.resumeFromSnooze()
-                }
-                if !stats.hasActiveSession {
-                    stats.startSession(scheduleName: currentActiveSchedule?.displayName ?? "Unknown", scheduleID: currentActiveSchedule?.id)
-                } else if let schedule = currentActiveSchedule {
-                    // Resumed session: a later-ending overlap may have taken over while snoozed
-                    stats.updateCurrentSession(scheduleName: schedule.displayName, scheduleID: schedule.id)
-                }
-                overlay.showOverlay()
-            } else {
-                stats.endSession(reason: .completed, at: sessionEnd)
-                overlay.hideOverlay()
-                currentBlockStartTime = nil
-                currentBlockEndTime = nil
-                activeSchedule = nil
-                snoozedScheduleID = nil
-                isManualBlock = false
-            }
-        } else if shouldBlock {
-            currentBlockEndTime = blockEnd
-            activeSchedule = currentActiveSchedule
-            activeScheduleNaturalEnd = ownerEnd
-
-            if continuesPreviousBlock {
-                // Waking mid-block: the session is still marked as sleeping
-                if isWakingFromSleep {
-                    stats.resumeFromSleep(to: .active)
-                }
-                // A later-ending overlap joined the block: it now names the block
-                if let schedule = currentActiveSchedule {
-                    stats.updateCurrentSession(scheduleName: schedule.displayName, scheduleID: schedule.id)
-                }
-            } else {
-                // The previous block is over and a separate one has taken over (back-to-back blocks,
-                // or one that started while asleep): close the old session at its end, start a new one
-                stats.endSession(reason: .completed, at: sessionEnd)
-                stats.startSession(scheduleName: currentActiveSchedule?.displayName ?? "Unknown", scheduleID: currentActiveSchedule?.id)
-                currentBlockStartTime = now
-            }
-        }
-
-        // The snoozed block ran past its extended end with nothing taking over
-        if snoozedBlockExpired && !shouldBlock {
-            stats.endSession(reason: .cancelled, at: sessionEnd)
-        }
-
-        // If waking from sleep with an open session but nothing is blocking, end the session
-        if isWakingFromSleep && !shouldBlock && stats.hasActiveSession {
-            stats.endSession(reason: .completed, at: sessionEnd)
-        }
-
-        updateNextBlockTime()
+    /// Forget the current block once it's over (ended, exited or cancelled)
+    private func clearBlock() {
+        isBlocking = false
+        manualBlockSchedule = nil
+        currentBlockEndTime = nil
+        activeSchedule = nil
+        snoozedScheduleID = nil
     }
 
     private func updateNextBlockTime() {
@@ -517,13 +469,13 @@ class ScheduleManager: ObservableObject {
     /// Whether a schedule can be resumed: it's within its scheduled time (e.g. after exiting early),
     /// or it's the block that's currently snoozed
     func canResume(_ schedule: Schedule) -> Bool {
-        guard isScheduleAvailable(schedule) else { return false }
+        guard isScheduleAvailable(schedule.id) else { return false }
         return schedule.isActive(at: AppClock.now()) || (isSnoozed && activeSchedule?.id == schedule.id)
     }
 
     /// The schedule still exists and is enabled
-    private func isScheduleAvailable(_ schedule: Schedule) -> Bool {
-        schedules.contains { $0.id == schedule.id && $0.isEnabled }
+    private func isScheduleAvailable(_ scheduleID: UUID) -> Bool {
+        schedules.contains { $0.id == scheduleID && $0.isEnabled }
     }
 
     /// Resume an interrupted schedule now, running until the end of its current occurrence
@@ -535,7 +487,6 @@ class ScheduleManager: ObservableObject {
         let isResumingFromSnooze = snoozeEndTime != nil && activeSchedule?.id == schedule.id
 
         manualBlockSchedule = schedule
-        currentBlockStartTime = now
 
         // Preserve extended end time if resuming from snooze, otherwise use this occurrence's end
         if !isResumingFromSnooze || currentBlockEndTime == nil {
@@ -547,7 +498,6 @@ class ScheduleManager: ObservableObject {
 
         activeSchedule = schedule
         isBlocking = true
-        isManualBlock = true
         snoozeEndTime = nil
 
         // Resume from snooze or start new session
@@ -577,14 +527,7 @@ class ScheduleManager: ObservableObject {
             exitedSchedules[schedule.id] = computeScheduleEndTime(for: schedule, at: now)
         }
 
-        manualBlockSchedule = nil
-        currentBlockStartTime = nil
-        currentBlockEndTime = nil
-        activeSchedule = nil
-        snoozedScheduleID = nil
-        isBlocking = false
-        isManualBlock = false
-
+        clearBlock()
         overlay.hideOverlay()
     }
 
@@ -655,6 +598,11 @@ class ScheduleManager: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Whether the current block was resumed by hand rather than started by its schedule
+    var isManualBlock: Bool {
+        manualBlockSchedule != nil
+    }
 
     /// Whether a block is currently snoozed (will resume when snoozeEndTime is reached)
     var isSnoozed: Bool {
