@@ -1,11 +1,11 @@
 import AppKit
 import UserNotifications
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+public class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController!
     private var scheduleManager: ScheduleManager!
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    public func applicationDidFinishLaunching(_ notification: Notification) {
         // Request notification permissions
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error = error {
@@ -23,7 +23,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    public func applicationWillTerminate(_ notification: Notification) {
         // Clear pending notifications - they're only useful if the app is running
         // (a "block starting soon" notification is misleading if no block will actually start)
         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()

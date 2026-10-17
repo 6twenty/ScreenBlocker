@@ -9,7 +9,12 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ScreenBlocker",
+            dependencies: ["ScreenBlockerKit"],
             path: "Sources/ScreenBlocker"
+        ),
+        .target(
+            name: "ScreenBlockerKit",
+            path: "Sources/ScreenBlockerKit"
         )
     ]
 )

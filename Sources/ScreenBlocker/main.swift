@@ -1,4 +1,5 @@
 import AppKit
+import ScreenBlockerKit
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
