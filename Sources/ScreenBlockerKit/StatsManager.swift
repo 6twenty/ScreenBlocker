@@ -215,8 +215,9 @@ class StatsManager {
         case .loaded(let existing):
             sessions = existing
         case .unreadable:
-            // Move the unreadable file aside so writing this session doesn't destroy its history
-            preserveUnreadableFile(at: url)
+            // Move the unreadable file aside so writing this session doesn't destroy its history.
+            // If that fails, skip this save rather than overwrite it.
+            guard preserveUnreadableFile(at: url) else { return }
             sessions = []
         }
 
@@ -262,15 +263,18 @@ class StatsManager {
         return []
     }
 
-    /// Renames an unreadable stats file (e.g. "2026-10.json" → "2026-10.unreadable-1792272069.json.bak").
-    private func preserveUnreadableFile(at url: URL) {
+    /// Renames an unreadable stats file (e.g. "2026-10.json" → "2026-10.unreadable-1792272069-<uuid>.json.bak").
+    /// Returns whether the original was moved out of the way.
+    private func preserveUnreadableFile(at url: URL) -> Bool {
         let stamp = Int(AppClock.now().timeIntervalSince1970)
-        let backupName = url.deletingPathExtension().lastPathComponent + ".unreadable-\(stamp).json.bak"
+        let backupName = url.deletingPathExtension().lastPathComponent + ".unreadable-\(stamp)-\(UUID().uuidString).json.bak"
         let backupURL = url.deletingLastPathComponent().appendingPathComponent(backupName)
         do {
             try FileManager.default.moveItem(at: url, to: backupURL)
+            return true
         } catch {
             print("Failed to preserve unreadable stats file \(url.lastPathComponent): \(error)")
+            return false
         }
     }
 
