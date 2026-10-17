@@ -53,4 +53,47 @@ struct ReviewFollowUpTests {
         h.manager.updateSchedule(schedule)
         #expect(!h.manager.canResume(schedule))
     }
+
+    @Test func laterEndingOverlapTakesOverSessionName() {
+        let a = makeSchedule((9, 0), (10, 0), name: "A")
+        let b = makeSchedule((9, 30), (11, 0), name: "B")
+        let h = Harness(schedules: [a, b])
+        h.tick(at: date(2026, 10, 19, 9, 0))
+        let sessionID = h.stats.currentSession?.id
+
+        h.tick(at: date(2026, 10, 19, 9, 30))
+        #expect(h.manager.activeSchedule?.name == "B")
+        #expect(h.stats.currentSession?.scheduleName == "B")
+        #expect(h.stats.currentSession?.id == sessionID)
+    }
+
+    @Test func wakingIntoSeparateLaterBlockStartsNewSession() {
+        let a = makeSchedule((9, 0), (9, 30), name: "A")
+        let b = makeSchedule((10, 0), (10, 30), name: "B")
+        let h = Harness(schedules: [a, b])
+        h.tick(at: date(2026, 10, 19, 9, 0))
+        h.sleep(at: date(2026, 10, 19, 9, 10))
+        h.wake(at: date(2026, 10, 19, 10, 10))
+
+        #expect(h.manager.activeSchedule?.name == "B")
+        #expect(h.stats.currentSession?.scheduleName == "B")
+        #expect(h.sessionState == .active)
+        #expect(h.savedSessions().first { $0.scheduleName == "A" }?.endReason == .completed)
+    }
+
+    @Test func backToBackBlocksGetSeparateSessions() {
+        let a = makeSchedule((9, 0), (10, 0), name: "A")
+        let b = makeSchedule((10, 0), (11, 0), name: "B")
+        let h = Harness(schedules: [a, b])
+        h.tick(at: date(2026, 10, 19, 9, 0))
+        h.tick(at: date(2026, 10, 19, 10, 0))
+
+        #expect(h.manager.isBlocking)
+        #expect(h.stats.currentSession?.scheduleName == "B")
+        #expect(h.savedSessions().first { $0.scheduleName == "A" }?.endReason == .completed)
+
+        h.tick(at: date(2026, 10, 19, 11, 0))
+        setClock(date(2026, 10, 19, 12, 0))
+        #expect(h.stats.totals(for: .day).active == 2 * 60 * 60)
+    }
 }

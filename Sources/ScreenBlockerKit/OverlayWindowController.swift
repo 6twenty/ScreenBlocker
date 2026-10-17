@@ -313,6 +313,11 @@ struct OverlayView: View {
             if contentOpacity > 0, let endTime = manager.currentBlockEndTime {
                 displayEndTime = endTime
             }
+            // Follow the block if another schedule takes it over (not while fading out)
+            if contentOpacity > 0, manager.isBlocking, let schedule = manager.activeSchedule {
+                displayName = title(for: schedule)
+                displayMessage = schedule.message
+            }
         }
         .onReceive(fadeInPublisher) { _ in
             fadeInContent()
@@ -361,17 +366,19 @@ struct OverlayView: View {
 
     /// Capture the current block's details, then fade the content in
     private func fadeInContent() {
-        if let schedule = manager.activeSchedule,
-           !schedule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            displayName = schedule.name
-        } else {
-            displayName = "Time for a Break"
-        }
+        displayName = title(for: manager.activeSchedule)
         displayMessage = manager.activeSchedule?.message ?? ""
         displayEndTime = manager.currentBlockEndTime
         withAnimation(.easeInOut(duration: 1.0)) {
             contentOpacity = 1
         }
+    }
+
+    private func title(for schedule: Schedule?) -> String {
+        guard let schedule, !schedule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "Time for a Break"
+        }
+        return schedule.name
     }
 
     /// Snooze button is only available within 5 minutes of the scheduled start time

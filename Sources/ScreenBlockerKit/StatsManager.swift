@@ -120,13 +120,27 @@ class StatsManager {
         return session.id
     }
 
-    /// End the current session with a reason.
-    func endSession(reason: EndReason) {
+    /// End the current session with a reason, optionally at an earlier moment than now
+    /// (e.g. the block's scheduled end, when that passed while the Mac was asleep).
+    func endSession(reason: EndReason, at endTime: Date? = nil) {
         guard var session = currentSession, session.isOpen else { return }
 
-        session.appendEvent(BlockEvent(state: .ended, endReason: reason))
+        // Never before the session's last event, so durations can't go negative
+        let timestamp = max(endTime ?? AppClock.now(), session.lastUpdatedAt)
+        session.appendEvent(BlockEvent(state: .ended, endReason: reason, timestamp: timestamp))
         saveSession(session)
         currentSession = nil
+    }
+
+    /// Re-attribute the open session to another schedule (keeps its ID and events)
+    func updateCurrentSession(scheduleName: String, scheduleID: UUID?) {
+        guard var session = currentSession, session.isOpen,
+              session.scheduleName != scheduleName || session.scheduleID != scheduleID else { return }
+
+        session.scheduleName = scheduleName
+        session.scheduleID = scheduleID
+        currentSession = session
+        saveCurrentSession()
     }
 
     // MARK: - State Transitions
