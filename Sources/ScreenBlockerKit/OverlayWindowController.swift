@@ -216,6 +216,7 @@ struct OverlayView: View {
     @ObservedObject private var overlayController = OverlayWindowController.shared
     @State private var currentTime = Date()
     @State private var showExitConfirmation = false
+    @State private var exitDialogBlockID: UUID?  // The block the exit dialog was opened for
     @State private var contentOpacity: Double = 0
 
     // Cached display values (preserved during fade out)
@@ -272,11 +273,11 @@ struct OverlayView: View {
 
                 Spacer().frame(height: 40)
 
-                if canSnooze {
+                if manager.canSnooze && isInQuickSnoozeWindow {
                     Button(action: {
-                        manager.snooze(minutes: 5)
+                        manager.snooze(blockID: manager.currentBlockID)
                     }) {
-                        Text("Snooze 5 Minutes")
+                        Text(snoozeTitle)
                             .font(.title3.weight(.semibold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 20)
@@ -286,7 +287,7 @@ struct OverlayView: View {
                     }
                     .buttonStyle(.plain)
 
-                    Text("The block will end 5 minutes later")
+                    Text("The block will end \(ScheduleManager.describeMinutes(manager.snoozeDuration)) later")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.5))
                 }
@@ -299,7 +300,7 @@ struct OverlayView: View {
                 HStack {
                     Spacer()
                     ExitBlockButton {
-                        showExitConfirmation = true
+                        openExitConfirmation()
                     }
                     .padding(20)
                 }
@@ -318,13 +319,17 @@ struct OverlayView: View {
                 displayName = title(for: schedule)
                 displayMessage = schedule.message
             }
+            // A dialog opened for a block that's since ended doesn't carry over to the next one
+            if showExitConfirmation && manager.currentBlockID != exitDialogBlockID {
+                showExitConfirmation = false
+            }
         }
         .onReceive(fadeInPublisher) { _ in
             fadeInContent()
         }
         .onReceive(exitRequestedPublisher) { _ in
             if isPrimary && contentOpacity > 0 {
-                showExitConfirmation = true
+                openExitConfirmation()
             }
         }
         .onReceive(fadeOutPublisher) { _ in
@@ -353,14 +358,57 @@ struct OverlayView: View {
         }
         .alert("Exit Block Early?", isPresented: $showExitConfirmation) {
             Button("Cancel", role: .cancel) { }
-            Button("Snooze 10 Minutes") {
-                manager.snooze(minutes: 10)
+            if manager.canSnooze {
+                Button(snoozeTitle) {
+                    manager.snooze(blockID: exitDialogBlockID)
+                }
             }
             Button("Exit Block", role: .destructive) {
-                manager.exitBlockEarly()
+                exitBlock(exitDialogBlockID)
             }
         } message: {
-            Text("Snoozing pauses the block for 10 minutes and moves its end time back to match. Exiting ends it now and is recorded in your stats.")
+            Text(exitDialogMessage)
+        }
+    }
+
+    /// "Snooze 5 Minutes"
+    private var snoozeTitle: String {
+        "Snooze \(ScheduleManager.describeMinutes(manager.snoozeDuration).capitalized)"
+    }
+
+    private func openExitConfirmation() {
+        exitDialogBlockID = manager.currentBlockID
+        showExitConfirmation = true
+    }
+
+    private var exitDialogMessage: String {
+        var parts: [String] = []
+        if manager.canSnooze {
+            let length = ScheduleManager.describeMinutes(manager.snoozeDuration)
+            parts.append("Snoozing pauses the block for \(length) and moves its end time back to match. Each block can be snoozed once.")
+        }
+        parts.append("Exiting ends it now and is recorded in your stats.")
+        if PinLock.shared.isEnabled {
+            parts.append("You'll need your PIN to exit.")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private func exitBlock(_ blockID: UUID?) {
+        guard PinLock.shared.isEnabled else {
+            manager.exitBlockEarly(blockID: blockID)
+            return
+        }
+        // Once the confirmation alert has gone, so the PIN prompt doesn't overlap it
+        DispatchQueue.main.async {
+            let pin = PinPrompt.requestPin(
+                title: "Exit Block Early?",
+                message: "Enter your PIN to exit this block.",
+                cancelIf: { !manager.isBlocking || manager.currentBlockID != blockID }
+            )
+            if pin != nil {
+                manager.exitBlockEarly(blockID: blockID)
+            }
         }
     }
 
@@ -381,8 +429,8 @@ struct OverlayView: View {
         return schedule.name
     }
 
-    /// Snooze button is only available within 5 minutes of the scheduled start time
-    private var canSnooze: Bool {
+    /// The quick snooze button is only offered within 5 minutes of the scheduled start time
+    private var isInQuickSnoozeWindow: Bool {
         guard let schedule = manager.activeSchedule else { return false }
 
         // Compute today's scheduled start time

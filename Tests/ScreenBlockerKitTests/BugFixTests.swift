@@ -136,7 +136,8 @@ struct CorruptDataTests {
         let stats = StatsManager(statsDirectory: FileManager.default.temporaryDirectory
             .appendingPathComponent("ScreenBlockerTests-\(UUID().uuidString)"))
         let manager = ScheduleManager(
-            defaults: defaults, stats: stats, overlay: FakeOverlay(), notificationCenter: FakeNotificationCenter()
+            defaults: defaults, stats: stats, overlay: FakeOverlay(), notificationCenter: FakeNotificationCenter(),
+            pinLock: PinLock(defaults: defaults)
         )
         #expect(manager.schedules.isEmpty)
 
@@ -204,7 +205,7 @@ struct NotificationReplenishTests {
     @Test func nextOccurrenceQueuedAfterBlockStarts() {
         let schedule = makeSchedule((9, 0), (9, 30))
         let h = Harness()
-        h.manager.notificationLeadTime = 5
+        h.manager.setNotificationLeadTime(5)
         setClock(date(2026, 10, 19, 8, 0))
         h.manager.schedules = [schedule]
         h.manager.saveSchedules()
@@ -218,7 +219,7 @@ struct NotificationReplenishTests {
     @Test func occurrencesBeyondADayAreQueued() {
         let schedule = makeSchedule((9, 0), (9, 30), days: [.wednesday])
         let h = Harness()
-        h.manager.notificationLeadTime = 5
+        h.manager.setNotificationLeadTime(5)
         setClock(date(2026, 10, 19, 8, 0)) // Monday
         h.manager.schedules = [schedule]
         h.manager.saveSchedules()

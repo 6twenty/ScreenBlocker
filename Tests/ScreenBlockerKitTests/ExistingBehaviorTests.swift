@@ -200,7 +200,7 @@ struct ExistingBehaviorTests {
     @Test func notificationScheduledAtLeadTime() {
         let schedule = makeSchedule((9, 0), (9, 30))
         let h = Harness()
-        h.manager.notificationLeadTime = 5
+        h.manager.setNotificationLeadTime(5)
         setClock(date(2026, 10, 19, 8, 0))
         h.manager.schedules = [schedule]
         h.manager.saveSchedules()
@@ -212,7 +212,8 @@ struct ExistingBehaviorTests {
         let schedule = makeSchedule((12, 0), (13, 0), name: "Lunch")
         let h = Harness(schedules: [schedule])
         let reloaded = ScheduleManager(
-            defaults: h.defaults, stats: h.stats, overlay: FakeOverlay(), notificationCenter: FakeNotificationCenter()
+            defaults: h.defaults, stats: h.stats, overlay: FakeOverlay(), notificationCenter: FakeNotificationCenter(),
+            pinLock: h.pinLock
         )
         #expect(reloaded.schedules == [schedule])
     }

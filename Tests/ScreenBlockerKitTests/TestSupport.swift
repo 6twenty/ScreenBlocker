@@ -81,6 +81,7 @@ func makeSchedule(
 final class Harness {
     let manager: ScheduleManager
     let stats: StatsManager
+    let pinLock: PinLock
     let overlay = FakeOverlay()
     let notifications = FakeNotificationCenter()
     let statsDirectory: URL
@@ -93,7 +94,8 @@ final class Harness {
         self.statsDirectory = statsDirectory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("ScreenBlockerTests-\(UUID().uuidString)", isDirectory: true)
         stats = StatsManager(statsDirectory: self.statsDirectory)
-        manager = ScheduleManager(defaults: defaults, stats: stats, overlay: overlay, notificationCenter: notifications)
+        pinLock = PinLock(defaults: defaults)
+        manager = ScheduleManager(defaults: defaults, stats: stats, overlay: overlay, notificationCenter: notifications, pinLock: pinLock)
         if !schedules.isEmpty {
             manager.schedules = schedules
             manager.saveSchedules()

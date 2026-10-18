@@ -8,7 +8,8 @@ class ScheduleManager: ObservableObject {
             defaults: .standard,
             stats: .shared,
             overlay: OverlayWindowController.shared,
-            notificationCenter: SystemNotificationCenter()
+            notificationCenter: SystemNotificationCenter(),
+            pinLock: .shared
         )
         manager.startMonitoring()
         return manager
@@ -24,8 +25,12 @@ class ScheduleManager: ObservableObject {
             if activeSchedule == nil { activeScheduleNaturalEnd = nil }
         }
     }
-    @Published var notificationLeadTime: Int = 5 // minutes before block
+    @Published private(set) var notificationLeadTime: Int = 5 // minutes before block
+    @Published private(set) var snoozeDuration: Int = 5 // minutes; 0 turns snoozing off
     @Published var snoozeEndTime: Date?
+    /// Identifies the current block. Stays the same across overlaps, snoozes and handovers to an
+    /// overlapping schedule; changes when a separate block starts.
+    @Published private(set) var currentBlockID: UUID?
 
     private var checkTimer: Timer?
     private var manualBlockSchedule: Schedule?
@@ -39,27 +44,35 @@ class ScheduleManager: ObservableObject {
     private var snoozedScheduleNaturalEnd: Date?
     // Own (unsnoozed) end of the schedule currently naming the block
     private var activeScheduleNaturalEnd: Date?
+    // Every schedule making up the current block
+    private var currentBlockScheduleIDs: Set<UUID> = []
+    // Each block can be snoozed once
+    private var hasSnoozedThisBlock = false
 
     private let schedulesKey = "ScreenBlocker.schedules"
     private let unreadableSchedulesBackupKey = "ScreenBlocker.schedules.unreadableBackup"
     private let notificationLeadTimeKey = "ScreenBlocker.notificationLeadTime"
+    private let snoozeDurationKey = "ScreenBlocker.snoozeDuration"
 
     private let defaults: UserDefaults
     private let stats: StatsManager
     private let overlay: OverlayPresenting
     private let notificationCenter: NotificationScheduling
+    private let pinLock: PinLock
 
     /// Creates a manager without starting the monitoring timer (tests drive `checkSchedules` directly).
     init(
         defaults: UserDefaults,
         stats: StatsManager,
         overlay: OverlayPresenting,
-        notificationCenter: NotificationScheduling
+        notificationCenter: NotificationScheduling,
+        pinLock: PinLock
     ) {
         self.defaults = defaults
         self.stats = stats
         self.overlay = overlay
         self.notificationCenter = notificationCenter
+        self.pinLock = pinLock
         loadSchedules()
         loadSettings()
     }
@@ -95,10 +108,32 @@ class ScheduleManager: ObservableObject {
         if defaults.object(forKey: notificationLeadTimeKey) != nil {
             notificationLeadTime = defaults.integer(forKey: notificationLeadTimeKey)
         }
+        if defaults.object(forKey: snoozeDurationKey) != nil {
+            snoozeDuration = defaults.integer(forKey: snoozeDurationKey)
+        }
     }
 
-    func saveSettings() {
+    // Settings changes are refused while the PIN is on and Settings are locked
+
+    @discardableResult
+    func setNotificationLeadTime(_ minutes: Int) -> Bool {
+        guard pinLock.canEditSettings else { return false }
+        notificationLeadTime = minutes
+        saveSettings()
+        return true
+    }
+
+    @discardableResult
+    func setSnoozeDuration(_ minutes: Int) -> Bool {
+        guard pinLock.canEditSettings else { return false }
+        snoozeDuration = minutes
+        saveSettings()
+        return true
+    }
+
+    private func saveSettings() {
         defaults.set(notificationLeadTime, forKey: notificationLeadTimeKey)
+        defaults.set(snoozeDuration, forKey: snoozeDurationKey)
         scheduleUpcomingNotifications()
     }
 
@@ -226,7 +261,11 @@ class ScheduleManager: ObservableObject {
                 stats.startSession(scheduleName: block.owner.displayName, scheduleID: block.owner.id)
             }
 
+            if closingPrevious != nil || currentBlockID == nil {
+                beginBlock()
+            }
             manualBlockSchedule = block.isManual ? block.owner : nil
+            currentBlockScheduleIDs = block.scheduleIDs
             snoozedScheduleID = block.snoozedScheduleID
             currentBlockEndTime = block.end
             activeSchedule = block.owner
@@ -251,6 +290,7 @@ class ScheduleManager: ObservableObject {
 
     private struct Block {
         let owner: Schedule           // Names the block
+        let scheduleIDs: Set<UUID>    // Every schedule making up the block
         let end: Date                 // Combined end, including any snooze extension
         let ownerEnd: Date?           // The owner's own (unsnoozed) end
         let isManual: Bool
@@ -279,16 +319,17 @@ class ScheduleManager: ObservableObject {
                 // A resumed block whose schedule was deleted or disabled (only possible while snoozed)
                 forcedEnd = .cancelled
             } else if let end = currentBlockEndTime, now < end {
-                let block = Block(owner: manual, end: end, ownerEnd: activeScheduleNaturalEnd, isManual: true, snoozedScheduleID: nil)
+                let block = Block(owner: manual, scheduleIDs: [manual.id], end: end, ownerEnd: activeScheduleNaturalEnd,
+                                  isManual: true, snoozedScheduleID: nil)
                 return .blocking(block, closingPrevious: nil)
-            } else {
-                forcedEnd = .completed
             }
+            // Otherwise it ran to its end. An overlapping schedule that's already running carries the block on.
             carriedEnd = nil
             snoozedID = nil
         }
 
         var owner: Schedule?
+        var scheduleIDs: Set<UUID> = []
         var ownerEnd: Date?     // Natural end of the schedule that names the block
         var blockEnd: Date?     // Combined end, including any snooze extension
         // Whether this continues the previous block, rather than being a separate one that took over
@@ -300,6 +341,7 @@ class ScheduleManager: ObservableObject {
                let schedule = schedules.first(where: { $0.id == id && $0.isEnabled }),
                exitedSchedules[id] == nil {
                 owner = schedule
+                scheduleIDs.insert(id)
                 ownerEnd = snoozedScheduleNaturalEnd ?? computeScheduleEndTime(for: schedule, at: now)
                 blockEnd = end
                 continuesPreviousBlock = true
@@ -323,6 +365,7 @@ class ScheduleManager: ObservableObject {
             if let previousBlockEnd, computeScheduleStartTime(for: schedule, at: now) < previousBlockEnd {
                 continuesPreviousBlock = true
             }
+            scheduleIDs.insert(schedule.id)
 
             // Overlapping schedules form one block, named after the schedule whose own (unsnoozed)
             // end is latest, so a snooze extension can't flip the name back and forth
@@ -348,8 +391,16 @@ class ScheduleManager: ObservableObject {
         // When the previous block is over and a separate one has taken over (back-to-back blocks,
         // or one that started while asleep), the old session closes and a new one starts
         let closingPrevious = forcedEnd ?? (continuesPreviousBlock ? nil : endReason)
-        let block = Block(owner: owner, end: blockEnd, ownerEnd: ownerEnd, isManual: false, snoozedScheduleID: snoozedID)
+        let block = Block(owner: owner, scheduleIDs: scheduleIDs, end: blockEnd, ownerEnd: ownerEnd,
+                          isManual: false, snoozedScheduleID: snoozedID)
         return .blocking(block, closingPrevious: closingPrevious)
+    }
+
+    /// A separate block is starting
+    private func beginBlock() {
+        currentBlockID = UUID()
+        hasSnoozedThisBlock = false
+        pinLock.lockSettings()
     }
 
     /// Forget the current block once it's over (ended, exited or cancelled)
@@ -359,6 +410,11 @@ class ScheduleManager: ObservableObject {
         currentBlockEndTime = nil
         activeSchedule = nil
         snoozedScheduleID = nil
+        if currentBlockID != nil {
+            currentBlockID = nil
+        }
+        currentBlockScheduleIDs = []
+        hasSnoozedThisBlock = false
     }
 
     private func updateNextBlockTime() {
@@ -423,7 +479,24 @@ class ScheduleManager: ObservableObject {
 
     // MARK: - Snooze
 
-    func snooze(minutes: Int = 5) {
+    /// Whether the block can be snoozed now: snoozing is on, once per block, and only if every schedule in it allows it
+    var canSnooze: Bool {
+        guard snoozeDuration > 0, isBlocking, !hasSnoozedThisBlock, !currentBlockScheduleIDs.isEmpty else { return false }
+        return currentBlockScheduleIDs.allSatisfy { id in
+            schedules.first { $0.id == id }?.allowsSnooze ?? false
+        }
+    }
+
+    /// Snooze the block for `minutes` (the snooze length setting by default), if allowed. `blockID` is the block
+    /// the request was made for (e.g. when a dialog opened); it's refused if a different block is running by now.
+    @discardableResult
+    func snooze(minutes: Int? = nil, blockID: UUID? = nil) -> Bool {
+        // Decide against the block as it is now, not as of the last tick
+        checkSchedules()
+        guard canSnooze, blockID == nil || blockID == currentBlockID else { return false }
+        hasSnoozedThisBlock = true
+
+        let minutes = minutes ?? snoozeDuration
         let now = AppClock.now()
         snoozeEndTime = now.addingTimeInterval(TimeInterval(minutes * 60))
         snoozedScheduleID = activeSchedule?.id  // Track for reliable resume after snooze
@@ -439,16 +512,21 @@ class ScheduleManager: ObservableObject {
 
         isBlocking = false
         overlay.hideOverlay()
+        return true
     }
 
     // MARK: - Schedule Management
 
+    // Changes are refused while the PIN is on and Settings are locked
+
     func addSchedule(_ schedule: Schedule) {
+        guard pinLock.canEditSettings else { return }
         schedules.append(schedule)
         saveSchedules()
     }
 
     func updateSchedule(_ schedule: Schedule) {
+        guard pinLock.canEditSettings else { return }
         if let index = schedules.firstIndex(where: { $0.id == schedule.id }) {
             schedules[index] = schedule
             saveSchedules()
@@ -456,6 +534,7 @@ class ScheduleManager: ObservableObject {
     }
 
     func deleteSchedule(_ schedule: Schedule) {
+        guard pinLock.canEditSettings else { return }
         // Remove notifications for this specific schedule (both pending and delivered)
         let identifier = "block-\(schedule.id.uuidString)"
         let center = notificationCenter
@@ -466,11 +545,17 @@ class ScheduleManager: ObservableObject {
         saveSchedules()
     }
 
-    /// Whether a schedule can be resumed: it's within its scheduled time (e.g. after exiting early),
-    /// or it's the block that's currently snoozed
+    /// Whether a schedule can be resumed: nothing is blocking, and it's within its scheduled time
+    /// (e.g. after exiting early) or it's the block that's currently snoozed
     func canResume(_ schedule: Schedule) -> Bool {
-        guard isScheduleAvailable(schedule.id) else { return false }
+        guard !isBlocking, isScheduleAvailable(schedule.id) else { return false }
         return schedule.isActive(at: AppClock.now()) || (isSnoozed && activeSchedule?.id == schedule.id)
+    }
+
+    /// Resuming this schedule would replace a different, snoozed block (and drop its extended time),
+    /// so it needs the PIN when that's on. Call `checkSchedules()` first so this reflects the block as it is now.
+    func resumeReplacesSnoozedBlock(_ schedule: Schedule) -> Bool {
+        isSnoozed && activeSchedule?.id != schedule.id
     }
 
     /// The schedule still exists and is enabled
@@ -478,10 +563,16 @@ class ScheduleManager: ObservableObject {
         schedules.contains { $0.id == scheduleID && $0.isEnabled }
     }
 
-    /// Resume an interrupted schedule now, running until the end of its current occurrence
-    func startManualBlock(from schedule: Schedule) {
+    /// Resume an interrupted schedule now, running until the end of its current occurrence. With the PIN on,
+    /// replacing a different snoozed block needs `replacingSnoozedBlock` set to that block's ID, once the PIN is entered.
+    func startManualBlock(from schedule: Schedule, replacingSnoozedBlock authorizedBlockID: UUID? = nil) {
+        // Decide against the block as it is now: a snooze may have just run out
+        checkSchedules()
         let now = AppClock.now()
         guard canResume(schedule) else { return }
+        if pinLock.isEnabled && resumeReplacesSnoozedBlock(schedule) {
+            guard let authorizedBlockID, authorizedBlockID == currentBlockID else { return }
+        }
 
         // Check if we're resuming from snooze (preserve extended end time)
         let isResumingFromSnooze = snoozeEndTime != nil && activeSchedule?.id == schedule.id
@@ -494,7 +585,9 @@ class ScheduleManager: ObservableObject {
         }
         if !isResumingFromSnooze {
             activeScheduleNaturalEnd = computeScheduleEndTime(for: schedule, at: now)
+            beginBlock()
         }
+        currentBlockScheduleIDs = [schedule.id]
 
         activeSchedule = schedule
         isBlocking = true
@@ -512,8 +605,11 @@ class ScheduleManager: ObservableObject {
         overlay.showOverlay()
     }
 
-    /// Exit the current block early, scheduled or manual (user chose to exit)
-    func exitBlockEarly() {
+    /// Exit the current block early, scheduled or manual (user chose to exit). `blockID` is the block the
+    /// request was made for; it's refused if a different block is running by now.
+    func exitBlockEarly(blockID: UUID? = nil) {
+        checkSchedules()
+        guard blockID == nil || blockID == currentBlockID else { return }
         stats.endSession(reason: .exited)
 
         // Mark every schedule in the block as exited until its natural end time (not extended by snooze),
@@ -580,8 +676,7 @@ class ScheduleManager: ObservableObject {
 
             let content = UNMutableNotificationContent()
             content.title = "Screen Block Starting Soon"
-            let minutes = notificationLeadTime == 1 ? "1 minute" : "\(notificationLeadTime) minutes"
-            content.body = "\(schedule.displayName) begins in \(minutes)"
+            content.body = "\(schedule.displayName) begins in \(Self.describeMinutes(notificationLeadTime))"
             content.sound = .default
 
             let components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: notifyTime)
@@ -598,6 +693,11 @@ class ScheduleManager: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// "1 minute", "5 minutes"
+    static func describeMinutes(_ minutes: Int) -> String {
+        minutes == 1 ? "1 minute" : "\(minutes) minutes"
+    }
 
     /// Whether the current block was resumed by hand rather than started by its schedule
     var isManualBlock: Bool {

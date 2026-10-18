@@ -10,6 +10,7 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
     var endMinute: Int
     var enabledDays: Set<Weekday>
     var isEnabled: Bool
+    var allowsSnooze: Bool  // Once per block
 
     init(
         id: UUID = UUID(),
@@ -20,7 +21,8 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
         endHour: Int = 9,
         endMinute: Int = 30,
         enabledDays: Set<Weekday> = Set(Weekday.allCases),
-        isEnabled: Bool = false
+        isEnabled: Bool = false,
+        allowsSnooze: Bool = true
     ) {
         self.id = id
         self.name = name
@@ -31,9 +33,10 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
         self.endMinute = endMinute
         self.enabledDays = enabledDays
         self.isEnabled = isEnabled
+        self.allowsSnooze = allowsSnooze
     }
 
-    // Custom Decodable to handle missing 'message' field from older saved data
+    // Custom Decodable to handle fields missing from older saved data
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
@@ -45,10 +48,11 @@ struct Schedule: Codable, Identifiable, Equatable, Hashable {
         endMinute = try container.decode(Int.self, forKey: .endMinute)
         enabledDays = try container.decode(Set<Weekday>.self, forKey: .enabledDays)
         isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        allowsSnooze = try container.decodeIfPresent(Bool.self, forKey: .allowsSnooze) ?? true
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, message, startHour, startMinute, endHour, endMinute, enabledDays, isEnabled
+        case id, name, message, startHour, startMinute, endHour, endMinute, enabledDays, isEnabled, allowsSnooze
     }
 
     /// Start and end are identical, which is treated as a 24-hour block

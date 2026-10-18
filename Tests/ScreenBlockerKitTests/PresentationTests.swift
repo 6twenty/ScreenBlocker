@@ -19,7 +19,7 @@ struct PresentationTests {
     @Test func notificationBodyUsesSingularMinute() {
         let schedule = makeSchedule((9, 0), (9, 30), name: "Lunch")
         let h = Harness()
-        h.manager.notificationLeadTime = 1
+        h.manager.setNotificationLeadTime(1)
         setClock(date(2026, 10, 19, 8, 0))
         h.manager.schedules = [schedule]
         h.manager.saveSchedules()

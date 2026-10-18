@@ -2,8 +2,9 @@ import SwiftUI
 
 struct SchedulesTab: View {
     @ObservedObject private var manager = ScheduleManager.shared
+    @ObservedObject private var pinLock = PinLock.shared
     @State private var selectedScheduleID: UUID?
-    @State private var showDeleteConfirmation = false
+    @State private var scheduleIDPendingDeletion: UUID?  // Captured when the confirmation opens
 
     private var selectedSchedule: Schedule? {
         guard let id = selectedScheduleID else { return nil }
@@ -27,8 +28,8 @@ struct SchedulesTab: View {
                     }
                 }
                 .onDeleteCommand {
-                    if selectedSchedule != nil {
-                        showDeleteConfirmation = true
+                    if pinLock.canEditSettings, let schedule = selectedSchedule {
+                        scheduleIDPendingDeletion = schedule.id
                     }
                 }
 
@@ -39,14 +40,15 @@ struct SchedulesTab: View {
                         Image(systemName: "plus")
                     }
                     .buttonStyle(.borderless)
+                    .disabled(!pinLock.canEditSettings)
                     .help("Add Schedule")
                     .accessibilityLabel("Add Schedule")
 
-                    Button(action: { showDeleteConfirmation = true }) {
+                    Button(action: { scheduleIDPendingDeletion = selectedSchedule?.id }) {
                         Image(systemName: "minus")
                     }
                     .buttonStyle(.borderless)
-                    .disabled(selectedSchedule == nil)
+                    .disabled(selectedSchedule == nil || !pinLock.canEditSettings)
                     .help("Delete Schedule")
                     .accessibilityLabel("Delete Schedule")
 
@@ -55,13 +57,18 @@ struct SchedulesTab: View {
                 .padding(8)
             }
             .frame(minWidth: 200, maxWidth: 250)
-            .alert("Delete Schedule", isPresented: $showDeleteConfirmation) {
+            .alert("Delete Schedule", isPresented: Binding(
+                get: { scheduleIDPendingDeletion != nil },
+                set: { if !$0 { scheduleIDPendingDeletion = nil } }
+            )) {
                 Button("Cancel", role: .cancel) { }
                 Button("Delete", role: .destructive) {
-                    removeSelectedSchedule()
+                    if let id = scheduleIDPendingDeletion {
+                        removeSchedule(id)
+                    }
                 }
             } message: {
-                if let schedule = selectedSchedule {
+                if let schedule = manager.schedules.first(where: { $0.id == scheduleIDPendingDeletion }) {
                     Text("Are you sure you want to delete \"\(schedule.displayName)\"?")
                 }
             }
@@ -69,7 +76,7 @@ struct SchedulesTab: View {
             // Schedule editor
             VStack {
                 if let schedule = selectedSchedule {
-                    ScheduleEditorView(schedule: binding(for: schedule))
+                    ScheduleEditorView(schedule: binding(for: schedule), isLocked: !pinLock.canEditSettings)
                 } else if manager.schedules.isEmpty {
                     VStack(spacing: 6) {
                         Text("No Schedules")
@@ -89,15 +96,18 @@ struct SchedulesTab: View {
     }
 
     private func addSchedule() {
+        guard pinLock.canEditSettings else { return }
         let newSchedule = Schedule()
         manager.addSchedule(newSchedule)
         selectedScheduleID = newSchedule.id
     }
 
-    private func removeSelectedSchedule() {
-        guard let schedule = selectedSchedule else { return }
+    private func removeSchedule(_ id: UUID) {
+        guard pinLock.canEditSettings, let schedule = manager.schedules.first(where: { $0.id == id }) else { return }
         manager.deleteSchedule(schedule)
-        selectedScheduleID = manager.schedules.first?.id
+        if selectedScheduleID == id {
+            selectedScheduleID = manager.schedules.first?.id
+        }
     }
 
     private func binding(for schedule: Schedule) -> Binding<Schedule> {
@@ -140,6 +150,8 @@ struct ScheduleRow: View {
 
 struct ScheduleEditorView: View {
     @Binding var schedule: Schedule
+    /// The PIN is on and Settings are locked. Resume Block stays available.
+    let isLocked: Bool
     @ObservedObject private var manager = ScheduleManager.shared
 
     var body: some View {
@@ -151,6 +163,17 @@ struct ScheduleEditorView: View {
 
                 Toggle("Enabled", isOn: $schedule.isEnabled)
             }
+            .disabled(isLocked)
+
+            Section {
+                Toggle("Allow snooze", isOn: $schedule.allowsSnooze)
+                Text(manager.snoozeDuration > 0
+                     ? "Each block can be snoozed once, for \(ScheduleManager.describeMinutes(manager.snoozeDuration)), which moves its end time back to match. When blocks overlap, all of them must allow it."
+                     : "Snoozing is turned off in General settings.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .disabled(isLocked)
 
             Section("Time") {
                 HStack {
@@ -169,6 +192,7 @@ struct ScheduleEditorView: View {
                         .foregroundColor(.secondary)
                 }
             }
+            .disabled(isLocked)
 
             Section("Days") {
                 HStack(spacing: 8) {
@@ -181,6 +205,7 @@ struct ScheduleEditorView: View {
                     }
                 }
             }
+            .disabled(isLocked)
 
             Section {
                 HStack {
@@ -197,12 +222,11 @@ struct ScheduleEditorView: View {
                     }
                 }
             }
+            .disabled(isLocked)
 
             Section {
                 VStack(alignment: .leading, spacing: 6) {
-                    Button("Resume Block") {
-                        manager.startManualBlock(from: schedule)
-                    }
+                    Button("Resume Block", action: resume)
                     .buttonStyle(.borderedProminent)
                     .disabled(!manager.canResume(schedule))
 
@@ -214,6 +238,23 @@ struct ScheduleEditorView: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func resume() {
+        manager.checkSchedules()
+        guard PinLock.shared.isEnabled && manager.resumeReplacesSnoozedBlock(schedule) else {
+            manager.startManualBlock(from: schedule)
+            return
+        }
+        let snoozedBlockID = manager.currentBlockID
+        let pin = PinPrompt.requestPin(
+            title: "Resume Block?",
+            message: "Another block is snoozed. Resuming this one replaces it and drops its remaining time, so it needs your PIN.",
+            cancelIf: { !manager.isSnoozed || manager.currentBlockID != snoozedBlockID }
+        )
+        if pin != nil {
+            manager.startManualBlock(from: schedule, replacingSnoozedBlock: snoozedBlockID)
+        }
     }
 
     private func toggleDay(_ day: Weekday) {

@@ -158,18 +158,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// Quit, confirming first if a block is running or snoozed (used by the menu item and Cmd-Q)
+    /// Quit (used by the menu item and Cmd-Q). AppDelegate confirms first, or asks for the PIN.
     @objc func quit() {
-        let manager = ScheduleManager.shared
-        if manager.isBlocking || manager.isSnoozed {
-            let alert = NSAlert()
-            alert.messageText = "Quit ScreenBlocker?"
-            alert.informativeText = "This ends the current block. It will be recorded as cancelled in your stats."
-            alert.addButton(withTitle: "Quit")
-            alert.addButton(withTitle: "Cancel")
-            NSApp.activate(ignoringOtherApps: true)
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
         NSApp.terminate(nil)
     }
 }
