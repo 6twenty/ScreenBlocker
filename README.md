@@ -3,15 +3,15 @@
 </p>
 
 <p align="center">
-  <img width="969" height="763" alt="image" src="https://github.com/user-attachments/assets/f6a6a58c-4c92-4ec4-888c-fb8e3abbf1d3" />
+  <img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/fad68e26-beba-46b5-a31e-556ff8f209f2" />
 </p>
 
 <p align="center">
-  <img width="796" height="653" alt="image" src="https://github.com/user-attachments/assets/de15c20f-8f19-49a3-b3ad-b6bab293c2ea" />
+  <img width="902" height="793" alt="image" src="https://github.com/user-attachments/assets/e6b906e3-8e99-4bc8-acf3-12d23f9a09d6" />
 </p>
 
 <p align="center">
-  <img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/6bda1035-034b-4afc-9953-97dc94123c21" />
+  <img width="902" height="793" alt="image" src="https://github.com/user-attachments/assets/d420b5ee-be7e-4469-9719-b55fd8ff36d0" />
 </p>
 
 ## PIN
